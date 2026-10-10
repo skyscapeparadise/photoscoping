@@ -43,8 +43,10 @@ void VideoDecoder::close() {
 
 bool VideoDecoder::open(const std::string& path, bool hardware) {
     close();
-    if (avformat_open_input(&format_, path.c_str(), nullptr, nullptr) < 0) {
-        SDL_Log("decoder: cannot open %s", path.c_str());
+    if (const int err = avformat_open_input(&format_, path.c_str(), nullptr, nullptr); err < 0) {
+        char reason[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(err, reason, sizeof reason);
+        SDL_Log("decoder: cannot open %s: %s", path.c_str(), reason);
         return false;
     }
     if (avformat_find_stream_info(format_, nullptr) < 0) {
