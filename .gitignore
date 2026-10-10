@@ -1,0 +1,41 @@
+.DS_Store
+**/.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Environment
+.env
+.env.*
+
+# C++ build output
+build/
+
+# Vendored dependency build outputs. The build_*.sh scripts are tracked;
+# what they produce is not -- it is large, machine-specific, and rebuildable
+# (each script is stamped, so a rebuild is a no-op once done).
+vendor/.build/
+vendor/.cache/
+vendor/ffmpeg/
+vendor/freetype/
+vendor/sdl3/
+vendor/sdl3_image/
+vendor/textstack/
+
+# Footage and render output: kept on disk, deliberately out of git.
+*.mov
+*.MOV
+*.mp4
+*.MP4
+*.mxf
+*.MXF
+*.r3d
+*.R3D
+*.braw
+*.ari
+*.exr
+*.dpx
+footage/
+renders/
