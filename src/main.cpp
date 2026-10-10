@@ -25,7 +25,7 @@ SDL_FColor background_for(ps::gpu::ColorMode mode) {
 }  // namespace
 
 int main(int, char**) {
-    SDL_SetAppMetadata("photoscoping", PHOTOSCOPING_VERSION, "com.rain.photoscoping");
+    SDL_SetAppMetadata("photoscoping", PHOTOSCOPING_VERSION, "com.rainmultimedia.photoscoping");
     SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_CREATOR_STRING, "rain multimedia");
     SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_COPYRIGHT_STRING,
                                "copyright © 2026 rain multimedia. all rights reserved.");
