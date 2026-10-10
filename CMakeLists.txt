@@ -73,30 +73,74 @@ pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil)
 pkg_check_modules(SWSCALE REQUIRED IMPORTED_TARGET libswscale)
 pkg_check_modules(SWRESAMPLE REQUIRED IMPORTED_TARGET libswresample)
 
+# Color math and LUTs: no GPU, no FFmpeg, so the headless tests can link it
+# and check the arithmetic the shaders mirror.
+add_library(photoscoping_color STATIC
+    src/color/color_space.cpp
+    src/color/cube_lut.cpp
+    src/color/ycbcr.cpp
+)
+target_include_directories(photoscoping_color PUBLIC src)
+
+# Decoding: FFmpeg, no GPU.
+add_library(photoscoping_media STATIC
+    src/media/video_decoder.cpp
+)
+target_include_directories(photoscoping_media PUBLIC src)
+target_link_libraries(photoscoping_media PUBLIC
+    photoscoping_color
+    SDL3::SDL3
+    PkgConfig::AVCODEC
+    PkgConfig::AVFORMAT
+    PkgConfig::AVUTIL
+)
+
+# Shaders: GLSL is the source of truth, compiled to SPIR-V (glslc) and then to
+# MSL (spirv-cross) into a generated header, the same pipeline as understory.
+# Generated into the build tree so nothing generated lives in src/. glslc and
+# spirv-cross are build tools, not shipped libraries, so they are required
+# rather than vendored.
+set(PHOTOSCOPING_SHADER_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/gpu/shaders_generated.hpp")
+file(GLOB PHOTOSCOPING_SHADER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/shaders/*")
+add_custom_command(
+    OUTPUT "${PHOTOSCOPING_SHADER_HEADER}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated/gpu"
+    COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/tools/build_shaders.py"
+                    "${PHOTOSCOPING_SHADER_HEADER}"
+    DEPENDS ${PHOTOSCOPING_SHADER_SOURCES}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/build_shaders.py"
+    COMMENT "compiling shaders (glsl -> spir-v -> msl)"
+    VERBATIM
+)
+add_custom_target(photoscoping_shaders DEPENDS "${PHOTOSCOPING_SHADER_HEADER}")
+
 # The GPU backing, as a library rather than loose sources compiled into the
 # executable, so the widget set can join it and be tested without a window.
 add_library(photoscoping_ui STATIC
     src/gpu/gpu_context.cpp
+    src/gpu/pipeline.cpp
+    src/gpu/ingest_pass.cpp
+    src/gpu/display_pass.cpp
 )
-target_include_directories(photoscoping_ui PUBLIC src)
+add_dependencies(photoscoping_ui photoscoping_shaders)
+target_include_directories(photoscoping_ui PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(photoscoping_ui PUBLIC
+    photoscoping_color
+    photoscoping_media
     SDL3::SDL3
     SDL3_ttf::SDL3_ttf
     SDL3_image::SDL3_image
 )
 
 add_executable(photoscoping src/main.cpp)
-target_link_libraries(photoscoping PRIVATE
-    photoscoping_ui
-    PkgConfig::AVCODEC
-    PkgConfig::AVFORMAT
-    PkgConfig::AVUTIL
-    PkgConfig::SWSCALE
-    PkgConfig::SWRESAMPLE
-)
+target_link_libraries(photoscoping PRIVATE photoscoping_ui)
 
 if(APPLE)
     target_link_libraries(photoscoping PRIVATE "-framework Cocoa")
 endif()
 
 enable_testing()
+
+add_executable(color_tests tests/test_color.cpp)
+target_link_libraries(color_tests PRIVATE photoscoping_color)
+add_test(NAME color COMMAND color_tests)

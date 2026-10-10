@@ -24,8 +24,10 @@ public:
 
     // `preferred` is a request, not a guarantee: asking for kEDR on a display
     // that cannot present it falls back to kSDR rather than failing. Check
-    // mode() afterwards for what was actually selected.
-    bool create(const char* title, int width, int height, ColorMode preferred);
+    // mode() afterwards for what was actually selected. A hidden window still
+    // gets a device and swapchain, which is what headless probes use.
+    bool create(const char* title, int width, int height, ColorMode preferred,
+                bool visible = true);
     void destroy();
 
     SDL_Window* window() const { return window_; }

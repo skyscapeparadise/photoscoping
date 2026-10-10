@@ -33,9 +33,11 @@ const char* texture_format_name(SDL_GPUTextureFormat format) {
 
 GpuContext::~GpuContext() { destroy(); }
 
-bool GpuContext::create(const char* title, int width, int height, ColorMode preferred) {
+bool GpuContext::create(const char* title, int width, int height, ColorMode preferred,
+                        bool visible) {
     window_ = SDL_CreateWindow(title, width, height,
-                               SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+                               SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+                                   (visible ? 0 : SDL_WINDOW_HIDDEN));
     if (!window_) {
         SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());
         return false;
@@ -87,7 +89,7 @@ bool GpuContext::create(const char* title, int width, int height, ColorMode pref
     // Without this the window can open behind whatever was frontmost, and an
     // inactive app receives no mouse-motion events at all -- hover states
     // simply never fire, which looks like a UI bug rather than a focus one.
-    SDL_RaiseWindow(window_);
+    if (visible) SDL_RaiseWindow(window_);
     return true;
 }
 

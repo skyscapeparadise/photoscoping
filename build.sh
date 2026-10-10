@@ -49,6 +49,17 @@ echo "building photoscoping (${BUILD_TYPE}, -j${JOBS})..."
 # vendored configure, nowhere near the actual cause.
 echo "  toolchain: ${DEVELOPER_DIR:-$(xcode-select -p)} (SDK $(xcrun --show-sdk-version))"
 
+# Shader build tools. Not vendored: they compile the shaders that ship with
+# photoscoping, at build time, and nothing links against them.
+for tool in glslc spirv-cross; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "error: '$tool' not found on PATH."
+        echo "  Shaders are authored in GLSL and compiled to SPIR-V then MSL."
+        echo "  Install with: brew install shaderc spirv-cross"
+        exit 1
+    fi
+done
+
 # Order matters: SDL3_image and SDL3_ttf both link against SDL3, so the
 # vendored SDL3 has to exist before they are configured.
 echo "  checking vendored SDL3..."

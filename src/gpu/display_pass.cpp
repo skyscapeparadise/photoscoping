@@ -1,0 +1,75 @@
+#include "gpu/display_pass.hpp"
+
+#include <algorithm>
+
+#include "color/color_space.hpp"
+#include "gpu/gpu_context.hpp"
+#include "gpu/pipeline.hpp"
+#include "gpu/shaders_generated.hpp"
+
+namespace ps::gpu {
+
+namespace {
+
+// std140 layout of display.frag's Display block.
+struct DisplayUniform {
+    float to_display[3][4];
+    float extended;
+    float pad[3];
+};
+
+}  // namespace
+
+DisplayPass::~DisplayPass() { destroy(); }
+
+bool DisplayPass::create(const GpuContext& gpu) {
+    device_ = gpu.device();
+    extended_ = gpu.mode() == ColorMode::kEDR;
+    pipeline_ = create_quad_pipeline(device_, shaders::kDisplayFragment, 1, gpu.swapchain_format());
+    // Linear filtering for now; an 8K frame in a small window aliases, which
+    // a mip chain or a proper downscale will fix when the viewer gets one.
+    sampler_ = create_sampler(device_, SDL_GPU_FILTER_LINEAR);
+    return pipeline_ && sampler_;
+}
+
+void DisplayPass::destroy() {
+    if (!device_) return;
+    if (pipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, pipeline_);
+    if (sampler_) SDL_ReleaseGPUSampler(device_, sampler_);
+    pipeline_ = nullptr;
+    sampler_ = nullptr;
+    device_ = nullptr;
+}
+
+void DisplayPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, Uint32 swap_w,
+                       Uint32 swap_h, SDL_GPUTexture* working, Uint32 work_w, Uint32 work_h,
+                       SDL_FColor background) {
+    SDL_GPUColorTargetInfo target = {};
+    target.texture = swapchain;
+    target.clear_color = background;
+    target.load_op = SDL_GPU_LOADOP_CLEAR;
+    target.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &target, 1, nullptr);
+    if (working && work_w && work_h && swap_w && swap_h) {
+        // Fit inside the window, centred, aspect preserved.
+        const float scale = std::min(static_cast<float>(swap_w) / work_w,
+                                     static_cast<float>(swap_h) / work_h);
+        const float sx = work_w * scale / swap_w;
+        const float sy = work_h * scale / swap_h;
+
+        DisplayUniform u = {};
+        const color::Mat3 m = color::working_to_rec709();
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) u.to_display[r][c] = m[r * 3 + c];
+        u.extended = extended_ ? 1.0f : 0.0f;
+
+        SDL_BindGPUGraphicsPipeline(pass, pipeline_);
+        const SDL_GPUTextureSamplerBinding binding = {working, sampler_};
+        SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
+        SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof u);
+        draw_quad(cmd, pass, QuadRect{{-sx, -sy, sx, sy}});
+    }
+    SDL_EndGPURenderPass(pass);
+}
+
+}  // namespace ps::gpu
