@@ -132,6 +132,8 @@ def write_plist(contents: Path, name: str, identifier: str, version: str) -> Non
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "12.0",
         "NSSupportsAutomaticGraphicsSwitching": True,
+        "NSHumanReadableCopyright":
+            "copyright © 2026 rain multimedia. all rights reserved.",
     }
     with (contents / "Info.plist").open("wb") as f:
         plistlib.dump(plist, f)
@@ -188,7 +190,7 @@ def main() -> int:
     parser.add_argument("--icon", type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--name", default="photoscoping")
-    parser.add_argument("--identifier", default="com.whiteshoal.photoscoping")
+    parser.add_argument("--identifier", default="com.rainmultimedia.photoscoping")
     parser.add_argument("--version", default="0.1.0")
     args = parser.parse_args()
 

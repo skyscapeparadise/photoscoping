@@ -19,3 +19,5 @@ minutes. Later builds skip them.
 photoscoping is free software released under the
 [GNU Lesser General Public License v2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html)
 or later.
+
+Copyright © 2026 Rain Multimedia LLC
