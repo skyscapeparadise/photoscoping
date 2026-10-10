@@ -190,7 +190,7 @@ def main() -> int:
     parser.add_argument("--icon", type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--name", default="photoscoping")
-    parser.add_argument("--identifier", default="com.rainmultimedia.photoscoping")
+    parser.add_argument("--identifier", default="com.rain.photoscoping")
     parser.add_argument("--version", default="0.1.0")
     args = parser.parse_args()
 
