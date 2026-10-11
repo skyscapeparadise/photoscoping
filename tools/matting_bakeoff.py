@@ -44,9 +44,9 @@ REC2020_TO_709 = np.array([[1.6605, -0.5876, -0.0728],
                            [-0.0182, -0.1006, 1.1187]], dtype=np.float32)
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-# Composites go over a dark flat slate: leftover cyc shows up on it as a pale
-# fringe, which a checkerboard hides.
-SLATE = np.array([0.10, 0.11, 0.13], dtype=np.float32)
+# Composites go over black: leftover cyc shows up on it as a pale fringe,
+# which a checkerboard hides.
+BACKGROUND = np.zeros(3, dtype=np.float32)
 
 
 def read_pfm(path: pathlib.Path) -> np.ndarray:
@@ -198,10 +198,10 @@ def save_rgb(img: np.ndarray, path: pathlib.Path, width: int | None = None) -> N
 
 
 def composite(srgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
-    # Display-referred over the slate. No foreground colour estimation: the
+    # Display-referred over the background. No foreground colour estimation: the
     # point is to see how much cyc each matte lets through.
-    slate = srgb_encode(SLATE)
-    return srgb * alpha[..., None] + slate * (1 - alpha[..., None])
+    background = srgb_encode(BACKGROUND)
+    return srgb * alpha[..., None] + background * (1 - alpha[..., None])
 
 
 def edge_crops(alpha: np.ndarray, size: int) -> list[tuple[int, int]]:
@@ -324,7 +324,7 @@ img {{ display:block; max-width:100%; }} .comp {{ width:520px; }} .crop {{ width
 .label {{ width:220px; }} .ms {{ color:#9a9aa2; }}
 </style>
 <h1>Matting bake-off</h1>
-<p>Composites are over a dark slate so leftover cyc shows as a pale fringe. Crops are 1:1
+<p>Composites are over black so leftover cyc shows as a pale fringe. Crops are 1:1
 source pixels on the subject's top and left edges. Timings: {e(device)}, per frame, excluding
 model load.</p>
 <table><tr><th>method</th><th>mean ms / frame</th><th>load s</th><th>GPU memory GiB</th></tr>"""]
