@@ -308,8 +308,8 @@ bool IngestPass::process(SDL_GPUCommandBuffer* cmd, const media::VideoDecoder& f
     return true;
 }
 
-std::vector<float> IngestPass::read_working() {
-    std::vector<float> out;
+std::vector<std::uint16_t> IngestPass::read_working_raw() {
+    std::vector<std::uint16_t> out;
     if (!working_) return out;
     const Uint32 size = width_ * height_ * 8;
     SDL_GPUTransferBufferCreateInfo info = {};
@@ -337,11 +337,17 @@ std::vector<float> IngestPass::read_working() {
         SDL_ReleaseGPUFence(device_, fence);
         const auto* halves = static_cast<const std::uint16_t*>(
             SDL_MapGPUTransferBuffer(device_, buffer, false));
-        out.resize(static_cast<std::size_t>(width_) * height_ * 4);
-        for (std::size_t i = 0; i < out.size(); ++i) out[i] = half_to_float(halves[i]);
+        out.assign(halves, halves + static_cast<std::size_t>(width_) * height_ * 4);
         SDL_UnmapGPUTransferBuffer(device_, buffer);
     }
     SDL_ReleaseGPUTransferBuffer(device_, buffer);
+    return out;
+}
+
+std::vector<float> IngestPass::read_working() {
+    const std::vector<std::uint16_t> halves = read_working_raw();
+    std::vector<float> out(halves.size());
+    for (std::size_t i = 0; i < halves.size(); ++i) out[i] = half_to_float(halves[i]);
     return out;
 }
 

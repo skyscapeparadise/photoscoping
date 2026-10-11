@@ -37,6 +37,7 @@ struct Options {
     std::int64_t frame = 0;
     std::string export_path;
     bool probe = false;
+    bool pipe = false;
     int bench = 0;
     bool software = false;
 };
@@ -50,6 +51,9 @@ void usage() {
         "  --probe        print working-space values for the frame and exit\n"
         "  --bench N      time decode and ingest over N frames and exit\n"
         "  --export FILE  write the frame's working image (linear Rec.2020) as PFM\n"
+        "  --pipe         stream every frame from --frame on to stdout and exit:\n"
+        "                 a header line \"PSRAW <w> <h> <frames> <fps>\", then\n"
+        "                 each frame as w*h RGBA half floats (linear Rec.2020)\n"
         "  --software     decode on the CPU instead of VideoToolbox\n"
         "\n"
         "keys: space play/pause, left/right step a frame, home first frame\n");
@@ -72,6 +76,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
             const char* v = value();
             if (!v) return std::nullopt;
             o.export_path = v;
+        } else if (a == "--pipe") {
+            o.pipe = true;
         } else if (a == "--probe") {
             o.probe = true;
         } else if (a == "--bench") {
@@ -88,7 +94,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
         }
     }
     if (!o.export_path.empty()) o.probe = true;
-    if ((o.probe || o.bench) && o.clip.empty()) return std::nullopt;
+    if ((o.probe || o.bench || o.pipe) && o.clip.empty()) return std::nullopt;
     return o;
 }
 
@@ -124,25 +130,25 @@ ps::gpu::InputTransform transform_for(const ps::media::SignalInfo& s,
 }
 
 void describe(const ps::media::VideoDecoder& d, const ps::gpu::InputTransform& t,
-              const std::optional<ps::color::CubeLut>& lut) {
+              const std::optional<ps::color::CubeLut>& lut, std::FILE* out) {
     const auto& s = d.signal();
-    std::printf("clip    : %dx%d %s, %.3f fps, %lld frames, %s decode\n", d.width(), d.height(),
+    std::fprintf(out, "clip    : %dx%d %s, %.3f fps, %lld frames, %s decode\n", d.width(), d.height(),
                 d.codec_name().c_str(), d.frame_rate(), static_cast<long long>(d.frame_count()),
                 d.hardware_decoding() ? "VideoToolbox" : "software");
-    std::printf("tags    : matrix %s%s, range %s%s, primaries %s, transfer %s\n",
+    std::fprintf(out, "tags    : matrix %s%s, range %s%s, primaries %s, transfer %s\n",
                 ps::color::matrix_name(s.matrix), s.matrix_tagged ? "" : " (untagged, assumed)",
                 ps::color::range_name(s.range), s.range_tagged ? "" : " (untagged, assumed)",
                 s.primaries.c_str(), s.transfer.c_str());
     if (lut) {
-        std::printf("lut     : %d^3%s, input %s\n", lut->size, lut->is_3d ? "" : " (1D)",
+        std::fprintf(out, "lut     : %d^3%s, input %s\n", lut->size, lut->is_3d ? "" : " (1D)",
                     !lut->full_range_in ? "range not stated"
                     : *lut->full_range_in ? "full range"
                                           : "narrow range");
-        for (const auto& c : lut->comments) std::printf("          %s\n", c.c_str());
+        for (const auto& c : lut->comments) std::fprintf(out, "          %s\n", c.c_str());
         if (!lut->output)
-            std::printf("          output not stated in the file; assuming Rec.709 BT.1886\n");
+            std::fprintf(out, "          output not stated in the file; assuming Rec.709 BT.1886\n");
     }
-    std::printf("decode  : %s -> %s, %s -> linear Rec.2020\n",
+    std::fprintf(out, "decode  : %s -> %s, %s -> linear Rec.2020\n",
                 t.use_lut ? "LUT" : "file tags", ps::color::gamut_name(t.gamut),
                 ps::color::transfer_name(t.transfer));
 }
@@ -257,7 +263,7 @@ int main(int argc, char** argv) {
 
     ps::gpu::GpuContext gpu;
     if (!gpu.create("photoscoping", 1440, 900, ps::gpu::ColorMode::kEDR,
-                    /*visible=*/!options->probe && !options->bench)) {
+                    /*visible=*/!options->probe && !options->bench && !options->pipe)) {
         SDL_Quit();
         return 1;
     }
@@ -278,7 +284,7 @@ int main(int argc, char** argv) {
     ps::gpu::InputTransform transform;
     if (have_clip) {
         transform = transform_for(decoder.signal(), lut);
-        describe(decoder, transform, lut);
+        describe(decoder, transform, lut, options->pipe ? stderr : stdout);
     }
 
     if (options->probe) {
@@ -300,6 +306,35 @@ int main(int argc, char** argv) {
         gpu.destroy();
         SDL_Quit();
         return ok && wrote ? 0 : 1;
+    }
+
+    if (options->pipe) {
+        // Frames go out exactly as the working image holds them, so a tool on
+        // the other end sees what the app sees. stdout carries nothing else.
+        std::fprintf(stdout, "PSRAW %u %u %lld %.6f\n", decoder.width(), decoder.height(),
+                     static_cast<long long>(decoder.frame_count() - decoder.frame_index()),
+                     decoder.frame_rate());
+        std::int64_t sent = 0;
+        bool ok = true;
+        do {
+            SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
+            ok = ingest.process(cmd, decoder, transform);
+            SDL_SubmitGPUCommandBuffer(cmd);
+            const std::vector<std::uint16_t> frame = ingest.read_working_raw();
+            if (!ok || frame.empty() ||
+                std::fwrite(frame.data(), sizeof frame[0], frame.size(), stdout) != frame.size()) {
+                ok = false;
+                break;
+            }
+            ++sent;
+        } while (decoder.read_next());
+        std::fflush(stdout);
+        std::fprintf(stderr, "piped %lld frames\n", static_cast<long long>(sent));
+        ingest.destroy();
+        display.destroy();
+        gpu.destroy();
+        SDL_Quit();
+        return ok ? 0 : 1;
     }
 
     if (options->bench) {

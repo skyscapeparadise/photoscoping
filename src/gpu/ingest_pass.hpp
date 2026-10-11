@@ -56,6 +56,8 @@ public:
     // Reads the working image back, RGBA as 32-bit floats. Synchronous: it
     // submits and waits, so it is for probes and tests, not the frame loop.
     std::vector<float> read_working();
+    // The same, as the half floats the texture stores, without conversion.
+    std::vector<std::uint16_t> read_working_raw();
 
 private:
     bool ensure_textures(const media::VideoDecoder& frame);
