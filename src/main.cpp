@@ -35,6 +35,7 @@ struct Options {
     std::string clip;
     std::string lut;
     std::int64_t frame = 0;
+    std::string export_path;
     bool probe = false;
     int bench = 0;
     bool software = false;
@@ -48,6 +49,7 @@ void usage() {
         "  --frame N      start on frame N (0-based)\n"
         "  --probe        print working-space values for the frame and exit\n"
         "  --bench N      time decode and ingest over N frames and exit\n"
+        "  --export FILE  write the frame's working image (linear Rec.2020) as PFM\n"
         "  --software     decode on the CPU instead of VideoToolbox\n"
         "\n"
         "keys: space play/pause, left/right step a frame, home first frame\n");
@@ -66,6 +68,10 @@ std::optional<Options> parse_args(int argc, char** argv) {
             const char* v = value();
             if (!v) return std::nullopt;
             o.frame = std::strtoll(v, nullptr, 10);
+        } else if (a == "--export") {
+            const char* v = value();
+            if (!v) return std::nullopt;
+            o.export_path = v;
         } else if (a == "--probe") {
             o.probe = true;
         } else if (a == "--bench") {
@@ -81,6 +87,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
             o.clip = a;
         }
     }
+    if (!o.export_path.empty()) o.probe = true;
     if ((o.probe || o.bench) && o.clip.empty()) return std::nullopt;
     return o;
 }
@@ -176,6 +183,23 @@ void print_probe(const std::vector<float>& rgba, Uint32 w, Uint32 h) {
     std::printf("  frame luminance: min %.4f, max %.4f (%.1f nits)\n", lo, hi, hi * 203.0f);
 }
 
+// Portable float map: the simplest format that carries linear float RGB
+// unmodified. Rows are stored bottom to top; a negative scale means little
+// endian.
+bool write_pfm(const std::string& path, const std::vector<float>& rgba, Uint32 w, Uint32 h) {
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    std::fprintf(f, "PF\n%u %u\n-1.0\n", w, h);
+    std::vector<float> row(static_cast<std::size_t>(w) * 3);
+    for (Uint32 y = h; y-- > 0;) {
+        const float* src = &rgba[static_cast<std::size_t>(y) * w * 4];
+        for (Uint32 x = 0; x < w; ++x)
+            for (int c = 0; c < 3; ++c) row[x * 3 + c] = src[x * 4 + c];
+        std::fwrite(row.data(), sizeof(float), row.size(), f);
+    }
+    return std::fclose(f) == 0;
+}
+
 void set_title(SDL_Window* window, const std::string& clip, const ps::media::VideoDecoder& d) {
     const auto slash = clip.find_last_of('/');
     const std::string name = slash == std::string::npos ? clip : clip.substr(slash + 1);
@@ -261,12 +285,21 @@ int main(int argc, char** argv) {
         SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
         const bool ok = ingest.process(cmd, decoder, transform);
         SDL_SubmitGPUCommandBuffer(cmd);
-        if (ok) print_probe(ingest.read_working(), ingest.width(), ingest.height());
+        bool wrote = true;
+        if (ok) {
+            const std::vector<float> working = ingest.read_working();
+            print_probe(working, ingest.width(), ingest.height());
+            if (!options->export_path.empty()) {
+                wrote = write_pfm(options->export_path, working, ingest.width(), ingest.height());
+                std::printf("%s %s\n", wrote ? "wrote" : "could not write",
+                            options->export_path.c_str());
+            }
+        }
         ingest.destroy();
         display.destroy();
         gpu.destroy();
         SDL_Quit();
-        return ok ? 0 : 1;
+        return ok && wrote ? 0 : 1;
     }
 
     if (options->bench) {

@@ -39,3 +39,7 @@ vendor/textstack/
 *.dpx
 footage/
 renders/
+
+# Python environment for tools/ scripts (the matting bake-off)
+.venv/
+__pycache__/
