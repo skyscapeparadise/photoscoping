@@ -102,6 +102,40 @@ def premultiplied_foreground(linear: np.ndarray, alpha: np.ndarray) -> np.ndarra
 TILE_W, TILE_H = 2048, 1152
 
 
+def smoothstep(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    t = np.clip((x - lo) / (hi - lo), 0.0, 1.0)
+    return t * t * (3 - 2 * t)
+
+
+def guided_hair(srgb: np.ndarray, alpha: np.ndarray, radius: int = 4,
+                eps: float = 1e-3) -> np.ndarray:
+    """Re-derives alpha in the soft band (hair, blur) with a guided filter
+    (He et al.): in every small window, alpha is refitted as a linear
+    function of the image. A strand half as dark as its surroundings gets
+    about half the coverage, rather than the model's near yes/no call that
+    can flip between frames. Local, linear and closed-form -- no trimap, no
+    global solve -- so it moves smoothly when the footage does.
+
+    `eps` sets how strongly it follows the image: smaller tracks finer detail.
+    Solid edges (alpha already near 0 or 1) are left exactly as they are."""
+    import cv2
+
+    guide = (srgb @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)).astype(np.float32)
+    a = alpha.astype(np.float32)
+    k = (2 * radius + 1, 2 * radius + 1)
+    box = lambda x: cv2.boxFilter(x, -1, k, borderType=cv2.BORDER_REFLECT)  # noqa: E731
+    mean_i, mean_a = box(guide), box(a)
+    cov = box(guide * a) - mean_i * mean_a
+    var = box(guide * guide) - mean_i * mean_i
+    slope = cov / (var + eps)
+    offset = mean_a - slope * mean_i
+    refined = np.clip(box(slope) * guide + box(offset), 0.0, 1.0)
+
+    soft = ((alpha > 0.02) & (alpha < 0.98)).astype(np.float32)
+    weight = np.clip(ndimage.gaussian_filter(soft, 3) * 3, 0.0, 1.0)
+    return (weight * refined + (1 - weight) * alpha).astype(np.float32)
+
+
 def tile_starts(length: int, tile: int, min_overlap: int = 128) -> list[int]:
     """The fewest evenly spaced tiles covering `length` that still overlap by
     `min_overlap`, enough to feather across. UHD takes 2 x 2."""

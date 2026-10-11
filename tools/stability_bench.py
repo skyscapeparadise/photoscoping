@@ -29,7 +29,8 @@ from scipy import ndimage
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from matting_bakeoff import REC2020_TO_709, BiRefNet, read_pfm, srgb_encode  # noqa: E402
-from matting_stack import premultiplied_foreground, tiled_alpha  # noqa: E402
+from matting_stack import (guided_hair, ml_foreground,  # noqa: E402
+                           premultiplied_foreground, tiled_alpha)
 
 
 def perturbations(linear: np.ndarray, rng: np.random.Generator):
@@ -56,6 +57,9 @@ def main() -> int:
     parser.add_argument("--crop", default="", help="x,y,w,h to measure in (default: all)")
     parser.add_argument("--methods", default="", help="comma-separated subset to run")
     parser.add_argument("--perturb", default="noise,shift", help="which perturbations")
+    parser.add_argument("--composite", default="push-pull",
+                        choices=["push-pull", "multilevel"],
+                        help="how the composite over black is made")
     args = parser.parse_args()
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -91,7 +95,23 @@ def main() -> int:
             return fn(clean.astype(np.float32) / 255, linear)
         return run
 
+    def guided(fn, eps):
+        def run(srgb, linear):
+            return guided_hair(srgb, fn(srgb, linear), eps=eps)
+        return run
+
+    def blur_guided(sigma, eps, guide_blurred):
+        def run(srgb, linear):
+            soft = ndimage.gaussian_filter(srgb, (sigma, sigma, 0))
+            alpha = tiles(soft, linear)
+            return guided_hair(soft if guide_blurred else srgb, alpha, eps=eps)
+        return run
+
     methods = {
+        "blur 1.2 + guided (blurred guide)": blur_guided(1.2, 1e-2, True),
+        "blur 1.2 + guided (sharp guide)": blur_guided(1.2, 1e-2, False),
+        "tiles + guided 1e-3": guided(tiles, 1e-3),
+        "tiles + guided 1e-2": guided(tiles, 1e-2),
         "coarse (v1)": coarse,
         "tiles": tiles,
         "tiles + flip average": flip(tiles),
@@ -103,6 +123,8 @@ def main() -> int:
     only = [m.strip() for m in args.methods.split(",")] if args.methods else list(methods)
     methods = {k: v for k, v in methods.items() if k in only}
 
+    composite = {"push-pull": premultiplied_foreground,
+                 "multilevel": ml_foreground}[args.composite]
     rng = np.random.default_rng(7)
     totals: dict[tuple[str, str], list[tuple[float, float]]] = {}
     for path in args.frames:
@@ -114,13 +136,13 @@ def main() -> int:
         print(path.stem, flush=True)
         for name, fn in methods.items():
             base_a = fn(srgb_encode(linear).astype(np.float32), linear)
-            base_c = srgb_encode(premultiplied_foreground(linear, base_a))
+            base_c = srgb_encode(composite(linear, base_a))
             for pname, plin, back in perturbations(linear, rng):
                 if pname not in args.perturb.split(","):
                     continue
                 plin = np.clip(plin, 0.0, None).astype(np.float32)
                 a = fn(srgb_encode(plin).astype(np.float32), plin)
-                c = srgb_encode(premultiplied_foreground(plin, a))
+                c = srgb_encode(composite(plin, a))
                 a, c = back(a), back(c)
                 region = (slice(y + 8, y + h - 8), slice(x + 8, x + w - 8))  # skip shift borders
                 ra, rb = base_a[region], a[region]

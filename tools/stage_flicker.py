@@ -26,7 +26,7 @@ from scipy import ndimage
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from matting_bakeoff import REC2020_TO_709, BiRefNet, srgb_encode  # noqa: E402
-from matting_stack import (band_matting, ml_foreground,  # noqa: E402
+from matting_stack import (band_matting, guided_hair, ml_foreground,  # noqa: E402
                            premultiplied_foreground, tiled_alpha)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -41,9 +41,11 @@ def main() -> int:
     parser.add_argument("--count", type=int, required=True)
     parser.add_argument("--crop", required=True, help="x,y,w,h in source pixels")
     parser.add_argument("--out", required=True, type=pathlib.Path)
-    parser.add_argument("--set", choices=["stages", "blur"], default="stages",
+    parser.add_argument("--set", choices=["stages", "blur", "composite", "hair"], default="stages",
                         help="stages: the stack stage by stage; blur: tiles with the "
-                             "model's input pre-blurred by 0, 0.7 and 1.2 px")
+                             "model's input pre-blurred by 0, 0.7 and 1.2 px; composite: "
+                             "the tiles matte composited two ways; hair: tiles, + 1.2 px "
+                             "input blur, + blur and guided filter, all multilevel fg")
     args = parser.parse_args()
     cx, cy, cw, ch = map(int, args.crop.split(","))
     args.out.mkdir(parents=True, exist_ok=True)
@@ -62,7 +64,7 @@ def main() -> int:
     # only the matte differs), then matting with the multilevel foreground,
     # which is what the latest render shows.
     panel_w = cw
-    n_panels = 4 if args.set == "stages" else 3
+    n_panels = {"stages": 4, "composite": 2}.get(args.set, 3)
     video = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
          "-s", f"{panel_w * n_panels}x{ch}", "-r", f"{fps:.6f}", "-i", "-",
@@ -77,7 +79,16 @@ def main() -> int:
         linear = np.clip(rgba[..., :3].astype(np.float32) @ REC2020_TO_709.T, 0.0, None)
         srgb = srgb_encode(linear).astype(np.float32)
 
-        if args.set == "blur":
+        if args.set == "composite":
+            tiled = tiled_alpha(model, srgb, model(srgb, linear, device), device)
+            alphas = {"tiles": tiled}
+        elif args.set == "hair":
+            soft = ndimage.gaussian_filter(srgb, (1.2, 1.2, 0))
+            blurred = tiled_alpha(model, soft, model(soft, linear, device), device)
+            alphas = {"tiles": tiled_alpha(model, srgb, model(srgb, linear, device), device),
+                      "blur 1.2": blurred,
+                      "blur 1.2 + guided": guided_hair(srgb, blurred, eps=1e-2)}
+        elif args.set == "blur":
             alphas = {}
             for sigma in (0.0, 0.7, 1.2):
                 seen = ndimage.gaussian_filter(srgb, (sigma, sigma, 0)) if sigma else srgb
@@ -99,7 +110,14 @@ def main() -> int:
                 changes.setdefault(s, []).append(float(np.abs(a - p)[band].mean()) if band.any() else 0.0)
             previous[s] = a
 
-        panels = [srgb_encode(premultiplied_foreground(linear, alphas[s]))[crop] for s in names]
+        if args.set == "hair":
+            panels = [srgb_encode(ml_foreground(linear, alphas[s]))[crop] for s in names]
+        elif args.set == "composite":
+            a = alphas["tiles"]
+            panels = [srgb_encode(fn(linear, a))[crop]
+                      for fn in (premultiplied_foreground, ml_foreground)]
+        else:
+            panels = [srgb_encode(premultiplied_foreground(linear, alphas[s]))[crop] for s in names]
         if args.set == "stages":
             panels.append(srgb_encode(ml_foreground(linear, matted))[crop])
         frame = np.concatenate(panels, axis=1)
@@ -115,8 +133,11 @@ def main() -> int:
     for s, c in changes.items():
         c = np.array(c)
         print(f"  {s:8s} mean {c.mean():.4f}   max {c.max():.4f}")
-    layout = ("coarse | tiles | matting | matting + multilevel fg" if args.set == "stages"
-              else "tiles | tiles + 0.7 px input blur | tiles + 1.2 px input blur")
+    layout = {"stages": "coarse | tiles | matting | matting + multilevel fg",
+              "blur": "tiles | tiles + 0.7 px input blur | tiles + 1.2 px input blur",
+              "composite": "tiles matte: push-pull | multilevel fg",
+              "hair": "tiles | + 1.2 px input blur | + blur and guided filter "
+                      "(all multilevel fg)"}[args.set]
     print(f"wrote {args.out / (args.set + '.mp4')} ({layout})")
     return 0
 
