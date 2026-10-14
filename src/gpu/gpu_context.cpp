@@ -93,7 +93,35 @@ bool GpuContext::create(const char* title, int width, int height, ColorMode pref
     return true;
 }
 
+bool GpuContext::resize_if_needed(Uint32 width, Uint32 height) {
+    if (width == 0 || height == 0) return false;
+    if (linear_target_ && width == target_w_ && height == target_h_) return true;
+    if (linear_target_) SDL_ReleaseGPUTexture(device_, linear_target_);
+
+    SDL_GPUTextureCreateInfo info = {};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = kLinearFormat;
+    info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = width;
+    info.height = height;
+    info.layer_count_or_depth = 1;
+    info.num_levels = 1;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    linear_target_ = SDL_CreateGPUTexture(device_, &info);
+    if (!linear_target_) {
+        SDL_Log("SDL_CreateGPUTexture (linear target) failed: %s", SDL_GetError());
+        target_w_ = target_h_ = 0;
+        return false;
+    }
+    target_w_ = width;
+    target_h_ = height;
+    return true;
+}
+
 void GpuContext::destroy() {
+    if (device_ && linear_target_) SDL_ReleaseGPUTexture(device_, linear_target_);
+    linear_target_ = nullptr;
+    target_w_ = target_h_ = 0;
     if (device_ && window_) {
         SDL_ReleaseWindowFromGPUDevice(device_, window_);
     }

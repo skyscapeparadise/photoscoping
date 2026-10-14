@@ -38,6 +38,12 @@ SHADERS = [
     ("quad.vert",    "vert", "kQuadVertex",     "vs_main"),
     ("ingest.frag",  "frag", "kIngestFragment",  "fs_main"),
     ("display.frag", "frag", "kDisplayFragment", "fs_main"),
+    ("nebula.frag",  "frag", "kNebulaFragment",  "fs_main"),
+    ("ui.vert",         "vert", "kUiVertex",          "vs_main"),
+    ("ui.frag",         "frag", "kUiFragment",        "fs_main"),
+    ("encode.vert",     "vert", "kEncodeVertex",      "vs_main"),
+    ("encode_sdr.frag", "frag", "kEncodeFragmentSdr", "fs_main"),
+    ("encode_edr.frag", "frag", "kEncodeFragmentEdr", "fs_main"),
 ]
 
 

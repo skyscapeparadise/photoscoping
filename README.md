@@ -20,7 +20,12 @@ minutes. Later builds skip them.
 
     ./build/photoscoping clip.mov --lut CinemaGamut_CanonLog3-to-BT709_WideDR_65_FF_Ver.2.0.cube
 
-Space plays and pauses, left/right step a frame, home returns to the start.
+Space plays and pauses, left/right step a frame, home returns to the start,
+and tab shows or hides the inspector. The window resizes freely: the viewer
+takes what the inspector and timeline leave, the inspector can be dragged
+wider or narrower by its left edge, and it folds away when the window gets
+too narrow for both. `--window WxH` opens at a given size and
+`--screenshot FILE` renders the window once to a PNG and exits.
 `--probe` prints the working-space values of a frame instead of opening a
 window, and `--bench N` times decode and ingest over N frames.
 

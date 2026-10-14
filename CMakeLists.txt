@@ -121,6 +121,19 @@ add_library(photoscoping_ui STATIC
     src/gpu/pipeline.cpp
     src/gpu/ingest_pass.cpp
     src/gpu/display_pass.cpp
+    src/gpu/nebula_pass.cpp
+    src/gpu/draw_list.cpp
+    src/gpu/texture.cpp
+    src/gpu/icon_atlas.cpp
+    src/ui/node.cpp
+    src/ui/widgets.cpp
+    src/ui/font.cpp
+    src/ui/text.cpp
+    src/ui/layout.cpp
+    src/editor/tool_strip.cpp
+    src/editor/timeline.cpp
+    src/editor/inspector.cpp
+    src/editor/editor_window.cpp
 )
 add_dependencies(photoscoping_ui photoscoping_shaders)
 target_include_directories(photoscoping_ui PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -132,7 +145,7 @@ target_link_libraries(photoscoping_ui PUBLIC
     SDL3_image::SDL3_image
 )
 
-add_executable(photoscoping src/main.cpp)
+add_executable(photoscoping src/main.cpp src/app/editor_app.cpp)
 target_link_libraries(photoscoping PRIVATE photoscoping_ui)
 
 if(APPLE)

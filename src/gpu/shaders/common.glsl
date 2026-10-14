@@ -45,7 +45,17 @@ vec3 decode_transfer(vec3 signal, int transfer) {
     return pow(max(signal, vec3(0.0)), vec3(2.4));
 }
 
-vec3 srgb_encode(vec3 linear) {
+// sRGB encoded -> linear. Interface colours are authored encoded.
+vec3 srgb_eotf(vec3 c) {
+    vec3 lo = c / 12.92;
+    vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
+    return mix(hi, lo, lessThanEqual(c, vec3(0.04045)));
+}
+
+float srgb_eotf(float c) { return srgb_eotf(vec3(c)).x; }
+
+// linear -> sRGB encoded, clamped. Exact inverse of srgb_eotf.
+vec3 srgb_oetf(vec3 linear) {
     vec3 l = clamp(linear, 0.0, 1.0);
     return mix(l * 12.92, 1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), l));
 }

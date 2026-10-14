@@ -7,29 +7,13 @@
 #include <optional>
 #include <string>
 
+#include "app/editor_app.hpp"
 #include "color/cube_lut.hpp"
-#include "gpu/display_pass.hpp"
 #include "gpu/gpu_context.hpp"
 #include "gpu/ingest_pass.hpp"
 #include "media/video_decoder.hpp"
 
 namespace {
-
-// The window background, as an sRGB-encoded colour.
-constexpr float kBackground[3] = {0.075f, 0.078f, 0.090f};
-
-float srgb_to_linear(float c) {
-    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
-}
-
-// The SDR swapchain is a plain UNORM format that takes encoded values as-is;
-// the extended linear one wants linear light. Same colour, two spellings.
-SDL_FColor background_for(ps::gpu::ColorMode mode) {
-    if (mode == ps::gpu::ColorMode::kSDR)
-        return {kBackground[0], kBackground[1], kBackground[2], 1.0f};
-    return {srgb_to_linear(kBackground[0]), srgb_to_linear(kBackground[1]),
-            srgb_to_linear(kBackground[2]), 1.0f};
-}
 
 struct Options {
     std::string clip;
@@ -40,6 +24,9 @@ struct Options {
     bool pipe = false;
     int bench = 0;
     bool software = false;
+    std::string screenshot;
+    int window_w = 1440;
+    int window_h = 900;
 };
 
 void usage() {
@@ -55,8 +42,12 @@ void usage() {
         "                 a header line \"PSRAW <w> <h> <frames> <fps>\", then\n"
         "                 each frame as w*h RGBA half floats (linear Rec.2020)\n"
         "  --software     decode on the CPU instead of VideoToolbox\n"
+        "  --window WxH   open the window at this size (default 1440x900)\n"
+        "  --screenshot FILE\n"
+        "                 render the window once, write it as PNG and exit\n"
         "\n"
-        "keys: space play/pause, left/right step a frame, home first frame\n");
+        "keys: space play/pause, left/right step a frame, home first frame,\n"
+        "      tab show or hide the inspector\n");
 }
 
 std::optional<Options> parse_args(int argc, char** argv) {
@@ -87,6 +78,15 @@ std::optional<Options> parse_args(int argc, char** argv) {
             if (o.bench <= 0) return std::nullopt;
         } else if (a == "--software") {
             o.software = true;
+        } else if (a == "--screenshot") {
+            const char* v = value();
+            if (!v) return std::nullopt;
+            o.screenshot = v;
+        } else if (a == "--window") {
+            const char* v = value();
+            if (!v || std::sscanf(v, "%dx%d", &o.window_w, &o.window_h) != 2 ||
+                o.window_w <= 0 || o.window_h <= 0)
+                return std::nullopt;
         } else if (a == "-h" || a == "--help" || a.rfind("-", 0) == 0 || !o.clip.empty()) {
             return std::nullopt;
         } else {
@@ -206,13 +206,34 @@ bool write_pfm(const std::string& path, const std::vector<float>& rgba, Uint32 w
     return std::fclose(f) == 0;
 }
 
-void set_title(SDL_Window* window, const std::string& clip, const ps::media::VideoDecoder& d) {
-    const auto slash = clip.find_last_of('/');
-    const std::string name = slash == std::string::npos ? clip : clip.substr(slash + 1);
-    const std::string title = name + " — frame " + std::to_string(d.frame_index()) +
-                              (d.frame_count() > 0 ? " / " + std::to_string(d.frame_count() - 1)
-                                                   : "");
-    SDL_SetWindowTitle(window, title.c_str());
+// The file's name without its directory or extension, which is what the
+// inspector and the title call the clip.
+std::string clip_name(const std::string& path) {
+    const auto slash = path.find_last_of('/');
+    std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    const auto dot = name.find_last_of('.');
+    if (dot != std::string::npos && dot > 0) name = name.substr(0, dot);
+    return name;
+}
+
+ps::editor::ClipInfo clip_info(const std::string& name, const ps::media::VideoDecoder& d,
+                               const std::string& lut_path) {
+    ps::editor::ClipInfo info;
+    info.name = name;
+    char text[64];
+    std::snprintf(text, sizeof text, "%d \xC3\x97 %d", d.width(), d.height());
+    info.rows.emplace_back("size", text);
+    std::snprintf(text, sizeof text, "%.3f", d.frame_rate());
+    // 24.000 reads as a measurement; 24 reads as a frame rate.
+    std::string rate = text;
+    rate.erase(rate.find_last_not_of('0') + 1);
+    if (rate.back() == '.') rate.pop_back();
+    info.rows.emplace_back("rate", rate + " fps");
+    info.rows.emplace_back("length", std::to_string(d.frame_count()) + " frames");
+    info.rows.emplace_back("codec", d.codec_name());
+    info.rows.emplace_back("decode", d.hardware_decoding() ? "videotoolbox" : "software");
+    info.rows.emplace_back("input", lut_path.empty() ? "file tags" : clip_name(lut_path));
+    return info;
 }
 
 }  // namespace
@@ -262,16 +283,17 @@ int main(int argc, char** argv) {
     }
 
     ps::gpu::GpuContext gpu;
-    if (!gpu.create("photoscoping", 1440, 900, ps::gpu::ColorMode::kEDR,
-                    /*visible=*/!options->probe && !options->bench && !options->pipe)) {
+    if (!gpu.create("photoscoping", options->window_w, options->window_h,
+                    ps::gpu::ColorMode::kEDR,
+                    /*visible=*/!options->probe && !options->bench && !options->pipe &&
+                        options->screenshot.empty())) {
         SDL_Quit();
         return 1;
     }
     SDL_Log("photoscoping %s\n%s", PHOTOSCOPING_VERSION, gpu.describe().c_str());
 
     ps::gpu::IngestPass ingest;
-    ps::gpu::DisplayPass display;
-    if (!ingest.create(gpu.device()) || !display.create(gpu)) {
+    if (!ingest.create(gpu.device())) {
         SDL_Quit();
         return 1;
     }
@@ -302,7 +324,6 @@ int main(int argc, char** argv) {
             }
         }
         ingest.destroy();
-        display.destroy();
         gpu.destroy();
         SDL_Quit();
         return ok && wrote ? 0 : 1;
@@ -331,7 +352,6 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
         std::fprintf(stderr, "piped %lld frames\n", static_cast<long long>(sent));
         ingest.destroy();
-        display.destroy();
         gpu.destroy();
         SDL_Quit();
         return ok ? 0 : 1;
@@ -360,95 +380,34 @@ int main(int argc, char** argv) {
                     frames, frames > 1 ? decode_ms / (frames - 1) : 0.0,
                     frames ? ingest_ms / frames : 0.0);
         ingest.destroy();
-        display.destroy();
         gpu.destroy();
         SDL_Quit();
         return 0;
     }
 
-    const SDL_FColor clear = background_for(gpu.mode());
-    bool fresh_frame = have_clip;
-    bool playing = false;
-    std::int64_t target = decoder.frame_index();
-    Uint64 next_due = 0;
-    if (have_clip) set_title(gpu.window(), options->clip, decoder);
-
-    bool running = true;
-    while (running) {
-        SDL_Event event;
-        // Block for input while paused; while playing, wake for the next frame.
-        bool got = false;
-        if (playing) {
-            const Uint64 now = SDL_GetTicksNS();
-            const Sint32 wait = next_due > now ? static_cast<Sint32>((next_due - now) / 1000000) : 0;
-            got = SDL_WaitEventTimeout(&event, wait);
+    ps::app::EditorApp::Clip clip;
+    if (have_clip) {
+        clip.decoder = &decoder;
+        clip.name = clip_name(options->clip);
+        clip.transform = [&decoder, &lut] { return transform_for(decoder.signal(), lut); };
+        clip.info = clip_info(clip.name, decoder, options->lut);
+    }
+    int status = 0;
+    {
+        ps::app::EditorApp app;
+        if (!app.create(gpu, ingest, std::move(clip))) {
+            status = 1;
+        } else if (!options->screenshot.empty()) {
+            const bool ok = app.screenshot(options->screenshot.c_str());
+            std::printf("%s %s\n", ok ? "wrote" : "could not write", options->screenshot.c_str());
+            status = ok ? 0 : 1;
         } else {
-            got = SDL_WaitEvent(&event);
+            app.run();
         }
-        if (got) {
-            do {
-                if (event.type == SDL_EVENT_QUIT) running = false;
-                if (event.type == SDL_EVENT_KEY_DOWN && have_clip) {
-                    switch (event.key.key) {
-                        case SDLK_SPACE:
-                            playing = !playing;
-                            next_due = SDL_GetTicksNS();
-                            break;
-                        case SDLK_RIGHT: playing = false; target = decoder.frame_index() + 1; break;
-                        case SDLK_LEFT:
-                            playing = false;
-                            target = std::max<std::int64_t>(0, decoder.frame_index() - 1);
-                            break;
-                        case SDLK_HOME: playing = false; target = 0; break;
-                        default: break;
-                    }
-                }
-            } while (SDL_PollEvent(&event));
-        }
-
-        if (playing && SDL_GetTicksNS() >= next_due) {
-            target = decoder.frame_index() + 1;
-            next_due += static_cast<Uint64>(1e9 / (decoder.frame_rate() > 0 ? decoder.frame_rate() : 24.0));
-        }
-        if (have_clip && target != decoder.frame_index()) {
-            const bool ok = target == decoder.frame_index() + 1 ? decoder.read_next()
-                                                                 : decoder.seek_frame(target);
-            if (ok) {
-                fresh_frame = true;
-                set_title(gpu.window(), options->clip, decoder);
-            } else {
-                playing = false;  // end of clip
-            }
-            target = decoder.frame_index();
-        }
-
-        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
-        if (!cmd) {
-            SDL_Log("SDL_AcquireGPUCommandBuffer failed: %s", SDL_GetError());
-            break;
-        }
-        if (fresh_frame) {
-            transform = transform_for(decoder.signal(), lut);
-            ingest.process(cmd, decoder, transform);
-            fresh_frame = false;
-        }
-        SDL_GPUTexture* swapchain = nullptr;
-        Uint32 sw = 0, sh = 0;
-        if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, gpu.window(), &swapchain, &sw, &sh)) {
-            SDL_Log("SDL_WaitAndAcquireGPUSwapchainTexture failed: %s", SDL_GetError());
-            SDL_CancelGPUCommandBuffer(cmd);
-            break;
-        }
-        // Null without an error when the window is minimized; nothing to draw.
-        if (swapchain)
-            display.draw(cmd, swapchain, sw, sh, ingest.working(), ingest.width(),
-                         ingest.height(), clear);
-        SDL_SubmitGPUCommandBuffer(cmd);
     }
 
     ingest.destroy();
-    display.destroy();
     gpu.destroy();
     SDL_Quit();
-    return 0;
+    return status;
 }

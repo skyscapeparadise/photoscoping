@@ -1,0 +1,376 @@
+#include "app/editor_app.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <string>
+#include <unordered_map>
+
+#include "editor/theme.hpp"
+
+namespace ps::app {
+
+namespace {
+
+// Largest a tool button's hand is drawn (ToolStrip: 84px buttons, 56/72 of
+// that the hand), and the transport's glyphs and the playhead's tip.
+constexpr float kLargeIcon = 66.0f;
+constexpr float kSmallIcon = 24.0f;
+
+constexpr int kMinWindowWidth = 640;
+constexpr int kMinWindowHeight = 400;
+
+// Where a bundled resource is. Next to the working directory when run from the
+// checkout; beside the executable's parent when run as build/photoscoping from
+// anywhere else; in Resources inside the .app. Resolved to a path rather than
+// changing directory, because clip and LUT paths on the command line are
+// relative to where the user ran it.
+std::string resource_path(const std::string& relative) {
+    std::error_code ec;
+    if (std::filesystem::exists(relative, ec)) return relative;
+    if (const char* base = SDL_GetBasePath()) {
+        const std::filesystem::path root(base);
+        for (const std::filesystem::path& candidate :
+             {root, root / "..", root / ".." / "Resources"}) {
+            if (std::filesystem::exists(candidate / relative, ec))
+                return (candidate / relative).lexically_normal().string();
+        }
+    }
+    return relative;
+}
+
+// Wheel deltas, in pixels, whatever produced them.
+//
+// A trackpad sends precise scrolls, which the Cocoa backend passes on as
+// pixels scaled down by ten; a wheel mouse sends line counts, one per notch.
+// Which kind a device sends is remembered per device -- one that has ever sent
+// a fractional delta is precise -- so a mouse does not inherit a trackpad's
+// scale on a machine with both.
+//
+// SDL's Cocoa backend negates the horizontal axis and not the vertical, so the
+// horizontal is flipped back where this is used, and both mean "the content
+// moves this way" by the time anything consumes them.
+constexpr float kPixelsPerPreciseUnit = 10.0f;
+constexpr float kPixelsPerNotch = 48.0f;
+
+float wheel_scale(const SDL_MouseWheelEvent& e) {
+    static std::unordered_map<SDL_MouseID, bool> precise;
+    bool& is_precise = precise[e.which];
+    if (!is_precise)
+        is_precise = (e.x != 0.0f && e.x != std::round(e.x)) ||
+                     (e.y != 0.0f && e.y != std::round(e.y));
+    return is_precise ? kPixelsPerPreciseUnit : kPixelsPerNotch;
+}
+
+// The viewer's background, cleared into the linear target, which holds
+// premultiplied nits against the interface's reference white.
+SDL_FColor viewer_background() {
+    auto linear = [](float c) {
+        return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+    };
+    const gpu::Color& c = editor::theme::kViewer;
+    const float nits = gpu::DrawList::kSdrRefNits;
+    return {linear(c.r) * nits, linear(c.g) * nits, linear(c.b) * nits, 1.0f};
+}
+
+SDL_FRect to_device(const gpu::Rect& r, float scale) {
+    // Whole pixels, so the footage and the nebula meet the interface's edges
+    // exactly rather than on a blended half pixel.
+    const float x0 = std::round(r.x * scale), y0 = std::round(r.y * scale);
+    const float x1 = std::round((r.x + r.w) * scale), y1 = std::round((r.y + r.h) * scale);
+    return {x0, y0, std::max(0.0f, x1 - x0), std::max(0.0f, y1 - y0)};
+}
+
+}  // namespace
+
+EditorApp::~EditorApp() { destroy(); }
+
+bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Clip clip) {
+    gpu_ = &gpu;
+    ingest_ = &ingest;
+    clip_ = std::move(clip);
+
+    SDL_SetWindowMinimumSize(gpu.window(), kMinWindowWidth, kMinWindowHeight);
+    SDL_SetWindowTitle(gpu.window(), clip_.decoder
+                                         ? ("photoscoping \xE2\x80\x94 " + clip_.name).c_str()
+                                         : "photoscoping");
+
+    if (!display_.create(gpu) || !nebula_.create(gpu) || !draw_.create(gpu)) return false;
+    if (!fonts_.init(gpu.device(), resource_path("fonts/MonaSans-Regular.ttf").c_str(),
+                     resource_path("fonts/MonaSans-Bold.ttf").c_str()))
+        return false;
+    if (!build_atlases()) return false;
+
+    root_.build(fonts_, large_icons_, small_icons_);
+    root_.inspector()->set_clip(clip_.info);
+
+    editor::Timeline* timeline = root_.timeline();
+    if (clip_.decoder) {
+        timeline->set_clip(clip_.decoder->frame_rate(), clip_.decoder->frame_count());
+        timeline->set_frame(clip_.decoder->frame_index());
+        target_ = clip_.decoder->frame_index();
+        fresh_frame_ = true;
+    }
+    timeline->on_seek = [this](std::int64_t frame) { seek(frame); };
+    timeline->on_play = [this](bool play) { set_playing(play); };
+    timeline->on_stop = [this] {
+        set_playing(false);
+        target_ = 0;
+    };
+    timeline->on_step = [this](int delta) {
+        if (!clip_.decoder) return;
+        set_playing(false);
+        target_ = std::max<std::int64_t>(0, clip_.decoder->frame_index() + delta);
+    };
+
+    SDL_AddEventWatch(&EditorApp::watch_events, this);
+    last_tick_ = SDL_GetTicksNS();
+    return true;
+}
+
+void EditorApp::destroy() {
+    if (!gpu_) return;
+    SDL_RemoveEventWatch(&EditorApp::watch_events, this);
+    // The interface holds text that belongs to the font cache's engine, so
+    // the tree goes first.
+    root_.clear_children();
+    large_icons_.destroy();
+    small_icons_.destroy();
+    fonts_.destroy();
+    draw_.destroy();
+    nebula_.destroy();
+    display_.destroy();
+    gpu_ = nullptr;
+}
+
+bool EditorApp::build_atlases() {
+    const float scale = SDL_GetWindowDisplayScale(gpu_->window());
+    atlas_scale_ = scale > 0.0f ? scale : 1.0f;
+    const std::string dir = resource_path("assets/icons");
+    return large_icons_.build(gpu_->device(), dir.c_str(),
+                              static_cast<int>(std::ceil(kLargeIcon * atlas_scale_))) &&
+           small_icons_.build(gpu_->device(), dir.c_str(),
+                              static_cast<int>(std::ceil(kSmallIcon * atlas_scale_)));
+}
+
+void EditorApp::set_playing(bool playing) {
+    if (!clip_.decoder) return;
+    playing_ = playing;
+    next_due_ = SDL_GetTicksNS();
+}
+
+void EditorApp::seek(std::int64_t frame) {
+    if (!clip_.decoder) return;
+    target_ = frame;
+    // Scrubbing while playing carries on from wherever the head was put.
+    next_due_ = SDL_GetTicksNS() +
+                static_cast<Uint64>(1e9 / std::max(1.0, clip_.decoder->frame_rate()));
+}
+
+void EditorApp::handle(const SDL_Event& event) {
+    switch (event.type) {
+        case SDL_EVENT_QUIT:
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            running_ = false;
+            break;
+        case SDL_EVENT_KEY_DOWN: {
+            media::VideoDecoder* d = clip_.decoder;
+            switch (event.key.key) {
+                case SDLK_SPACE:
+                    if (!event.key.repeat) set_playing(!playing_);
+                    break;
+                case SDLK_RIGHT:
+                    if (d) { set_playing(false); target_ = d->frame_index() + 1; }
+                    break;
+                case SDLK_LEFT:
+                    if (d) {
+                        set_playing(false);
+                        target_ = std::max<std::int64_t>(0, d->frame_index() - 1);
+                    }
+                    break;
+                case SDLK_HOME:
+                    set_playing(false);
+                    target_ = 0;
+                    break;
+                case SDLK_TAB:
+                    if (!event.key.repeat) root_.toggle_panel();
+                    break;
+                default: break;
+            }
+            break;
+        }
+        case SDL_EVENT_MOUSE_MOTION:
+            input_.set_pointer(event.motion.x, event.motion.y);
+            break;
+        case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+            input_.pointer_left();
+            break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+            if (event.button.button == SDL_BUTTON_LEFT) input_.press();
+            else if (event.button.button == SDL_BUTTON_RIGHT) input_.press_right();
+            break;
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+            if (event.button.button == SDL_BUTTON_LEFT) input_.release();
+            else if (event.button.button == SDL_BUTTON_RIGHT) input_.release_right();
+            break;
+        case SDL_EVENT_MOUSE_WHEEL: {
+            const float s = wheel_scale(event.wheel);
+            input_.wheel(-event.wheel.x * s, event.wheel.y * s, root_);
+            break;
+        }
+        case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+            // Dragged onto a display of another density: the art is
+            // rasterized for the old one. Rebuilt in place, so every icon node
+            // pointing at an atlas keeps pointing at the right one.
+            if (SDL_GetWindowDisplayScale(gpu_->window()) != atlas_scale_) build_atlases();
+            break;
+        default: break;
+    }
+}
+
+void EditorApp::decode_pending() {
+    media::VideoDecoder* d = clip_.decoder;
+    if (!d) return;
+    if (playing_ && SDL_GetTicksNS() >= next_due_) {
+        target_ = d->frame_index() + 1;
+        next_due_ += static_cast<Uint64>(1e9 / (d->frame_rate() > 0 ? d->frame_rate() : 24.0));
+    }
+    if (target_ != d->frame_index()) {
+        const bool ok = target_ == d->frame_index() + 1 ? d->read_next() : d->seek_frame(target_);
+        if (ok) fresh_frame_ = true;
+        else playing_ = false;  // the end of the clip
+        target_ = d->frame_index();
+    }
+    root_.timeline()->set_frame(d->frame_index());
+    root_.timeline()->set_playing(playing_);
+}
+
+void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, float dt) {
+    if (fresh_frame_ && clip_.decoder) {
+        ingest_->process(cmd, *clip_.decoder, clip_.transform());
+        fresh_frame_ = false;
+    }
+    gpu_->resize_if_needed(width, height);
+
+    int lw = 0, lh = 0;
+    SDL_GetWindowSize(gpu_->window(), &lw, &lh);
+    const float scale = lw > 0 ? static_cast<float>(width) / lw : 1.0f;
+
+    root_.layout(static_cast<float>(lw), static_cast<float>(lh));
+    input_.update(root_);
+    animating_ = root_.tick(dt);
+    // The tick can move the panel; lay out again so what is drawn is where
+    // the animation has got to, not where it was a frame ago.
+    if (animating_) root_.layout(static_cast<float>(lw), static_cast<float>(lh));
+
+    composite_backdrop(cmd, scale);
+    draw_.begin_frame(scale);
+    root_.paint(draw_, ui::PaintContext{});
+}
+
+void EditorApp::composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale) {
+    const bool have_frame = clip_.decoder && ingest_->working();
+    display_.draw(cmd, gpu_->linear_target(), to_device(root_.viewer_rect(), scale),
+                  have_frame ? ingest_->working() : nullptr, ingest_->width(), ingest_->height(),
+                  viewer_background());
+    const gpu::Rect panel = root_.panel_rect();
+    nebula_.draw(cmd, gpu_->linear_target(), to_device(panel, scale), panel.w, panel.h,
+                 root_.panel_width());
+}
+
+bool EditorApp::render() {
+    if (rendering_) return true;
+    rendering_ = true;
+
+    const Uint64 now = SDL_GetTicksNS();
+    // Clamped, so a long block on input does not land as one enormous step
+    // that finishes every animation at once.
+    const float dt = std::min(0.1f, static_cast<float>(now - last_tick_) / 1e9f);
+    last_tick_ = now;
+
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu_->device());
+    if (!cmd) {
+        SDL_Log("SDL_AcquireGPUCommandBuffer failed: %s", SDL_GetError());
+        rendering_ = false;
+        return false;
+    }
+    SDL_GPUTexture* swapchain = nullptr;
+    Uint32 sw = 0, sh = 0;
+    if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, gpu_->window(), &swapchain, &sw, &sh)) {
+        SDL_Log("SDL_WaitAndAcquireGPUSwapchainTexture failed: %s", SDL_GetError());
+        SDL_CancelGPUCommandBuffer(cmd);
+        rendering_ = false;
+        return false;
+    }
+    // Null without an error when the window is minimized; nothing to draw.
+    if (swapchain) {
+        prepare(cmd, sw, sh, dt);
+        draw_.upload(cmd);
+        draw_.render_ui(cmd, sw, sh, /*clear=*/false);
+        draw_.encode(cmd, swapchain);
+    }
+    SDL_SubmitGPUCommandBuffer(cmd);
+    rendering_ = false;
+    return true;
+}
+
+bool SDLCALL EditorApp::watch_events(void* self, SDL_Event* event) {
+    auto* app = static_cast<EditorApp*>(self);
+    if (event->type == SDL_EVENT_WINDOW_EXPOSED && event->window.data1 == 1 && app->running_)
+        app->render();
+    return true;
+}
+
+void EditorApp::run() {
+    running_ = true;
+    while (running_) {
+        SDL_Event event;
+        // Block for input when nothing is moving; while playing, wake for the
+        // next frame; while something animates, keep going.
+        bool got = false;
+        if (playing_) {
+            const Uint64 now = SDL_GetTicksNS();
+            const Sint32 wait =
+                next_due_ > now ? static_cast<Sint32>((next_due_ - now) / 1000000) : 0;
+            got = SDL_WaitEventTimeout(&event, wait);
+        } else if (animating_) {
+            got = SDL_PollEvent(&event);
+        } else {
+            got = SDL_WaitEvent(&event);
+        }
+        if (got) {
+            do handle(event);
+            while (SDL_PollEvent(&event));
+        }
+        decode_pending();
+        if (!running_ || !render()) break;
+    }
+    running_ = false;
+}
+
+bool EditorApp::screenshot(const char* path) {
+    int pw = 0, ph = 0;
+    SDL_GetWindowSizeInPixels(gpu_->window(), &pw, &ph);
+    if (pw <= 0 || ph <= 0) return false;
+
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu_->device());
+    if (!cmd) return false;
+    // Settle every animation first: what is wanted is the resting state.
+    prepare(cmd, static_cast<Uint32>(pw), static_cast<Uint32>(ph), 0.0f);
+    for (int i = 0; i < 100 && root_.tick(0.05f); ++i) {}
+    // The first pass laid out against unsettled animations; this one draws
+    // the settled state over the same target.
+    int lw = 0, lh = 0;
+    SDL_GetWindowSize(gpu_->window(), &lw, &lh);
+    const float scale = static_cast<float>(pw) / std::max(1, lw);
+    root_.layout(static_cast<float>(lw), static_cast<float>(lh));
+    composite_backdrop(cmd, scale);
+    SDL_SubmitGPUCommandBuffer(cmd);
+
+    draw_.begin_frame(scale);
+    root_.paint(draw_, ui::PaintContext{});
+    return draw_.save_png(path, static_cast<Uint32>(pw), static_cast<Uint32>(ph),
+                          /*clear_target=*/false);
+}
+
+}  // namespace ps::app

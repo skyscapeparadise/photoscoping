@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A filled triangle pointing down, its viewBox its own bounding box, so an
+     IconNode set to Fit fills whatever rect it is given and the size is the
+     caller's to pick. Two callers: the dropdown indicator every ComboBox in
+     the QML draws as a text "▾" (U+25BE), which MonaSans has no glyph for, and
+     the tip the timeline's playhead wears. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 8"
+  preserveAspectRatio="xMidYMid meet">
+  <polygon points="0,0 12,0 6,8" fill="#ffffff"/>
+</svg>
