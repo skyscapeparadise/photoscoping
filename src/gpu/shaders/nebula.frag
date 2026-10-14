@@ -10,6 +10,10 @@
 // coordinates are pushed around by one noise field before sampling the next,
 // which turns blobs into the folded, filamentary shapes of real gas.
 //
+// It churns. Each layer of the warp drifts through its noise at its own speed
+// and in its own direction, so rather than the cloud sliding past as one
+// piece, the folds roll over one another and the lanes open and close.
+//
 // Everything is measured in logical pixels from the panel's top-right corner.
 // Widening the panel uncovers more of the same sky to the left rather than
 // stretching what is already there, and sliding it away carries the sky with
@@ -22,7 +26,13 @@ layout(set = 3, binding = 0) uniform Nebula {
     vec2 size;           // the part on screen, logical pixels
     float panel_width;   // the whole panel, of which that is the left part
     float sdr_ref_nits;
+    float time;          // seconds of churn so far
+    float pad0, pad1, pad2;
 } nebula;
+
+// How fast it churns. Everything below moves in proportion, so this is the
+// one number to change for a calmer or a more restless sky.
+const float kChurn = 1.0;
 
 float hash12(vec2 p) {
     vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -56,24 +66,29 @@ float fbm(vec2 p) {
     return sum / 0.984;
 }
 
-// Sparse single-pixel-ish stars: at most one per cell, most cells empty.
-float stars(vec2 px, float cell, float density) {
+// Sparse single-pixel-ish stars: at most one per cell, most cells empty. Each
+// one breathes slowly at a rate of its own.
+float stars(vec2 px, float cell, float density, float t) {
     vec2 c = floor(px / cell);
     float h = hash12(c + 71.3);
     if (h > density) return 0.0;
     vec2 at = (vec2(hash12(c + 3.1), hash12(c + 9.7)) * 0.8 + 0.1) * cell;
     float d = length(px - c * cell - at);
     float twinkle = 0.4 + 0.6 * hash12(c + 23.9);
-    return twinkle * exp(-d * d * 1.6);
+    float breath = 0.7 + 0.3 * sin(t * (0.4 + 1.2 * hash12(c + 5.5)) + 6.2832 * hash12(c + 41.0));
+    return twinkle * breath * exp(-d * d * 1.6);
 }
 
 void main() {
     vec2 px = vec2(v_uv.x * nebula.size.x - nebula.panel_width, v_uv.y * nebula.size.y);
     vec2 p = px / 300.0 + vec2(3.7, 1.9);
 
-    vec2 q = vec2(fbm(p), fbm(p + vec2(5.2, 1.3)));
-    vec2 r = vec2(fbm(p + 3.2 * q + vec2(1.7, 9.2)), fbm(p + 3.2 * q + vec2(8.3, 2.8)));
-    float f = fbm(p + 3.0 * r);
+    float t = nebula.time * kChurn;
+
+    vec2 q = vec2(fbm(p + vec2(0.021, 0.013) * t), fbm(p + vec2(5.2, 1.3) - vec2(0.017, 0.024) * t));
+    vec2 r = vec2(fbm(p + 3.2 * q + vec2(1.7, 9.2) + vec2(-0.032, 0.041) * t),
+                  fbm(p + 3.2 * q + vec2(8.3, 2.8) + vec2(0.038, -0.027) * t));
+    float f = fbm(p + 3.0 * r + vec2(0.009, -0.006) * t);
 
     // The large-scale shape: light gathers in the upper part of the panel and
     // falls away to black toward the bottom. Measured against the panel's
@@ -100,7 +115,7 @@ void main() {
     col *= mix(1.0, lane, 0.85 * fall);
 
     // A few stars, dimmer where the cloud is thick, as if seen through it.
-    float s = stars(px, 46.0, 0.10) + 0.6 * stars(px + 400.0, 23.0, 0.05);
+    float s = stars(px, 46.0, 0.10, t) + 0.6 * stars(px + 400.0, 23.0, 0.05, t);
     col += vec3(0.85, 0.80, 1.0) * s * (1.0 - smoothstep(0.35, 0.8, f)) * 0.55;
 
     // Dither in encoded space: a dark gradient through an 8-bit swapchain

@@ -14,6 +14,8 @@ struct NebulaUniform {
     float size[2];
     float panel_width;
     float sdr_ref_nits;
+    float time;
+    float pad[3];
 };
 
 }  // namespace
@@ -34,7 +36,7 @@ void NebulaPass::destroy() {
 }
 
 void NebulaPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const SDL_FRect& area,
-                      float logical_w, float logical_h, float panel_w) {
+                      float logical_w, float logical_h, float panel_w, float time) {
     if (area.w < 1.0f || area.h < 1.0f) return;
     SDL_GPUColorTargetInfo info = {};
     info.texture = target;
@@ -49,6 +51,7 @@ void NebulaPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const S
     u.size[1] = logical_h;
     u.panel_width = panel_w;
     u.sdr_ref_nits = DrawList::kSdrRefNits;
+    u.time = time;
     SDL_BindGPUGraphicsPipeline(pass, pipeline_);
     SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof u);
     draw_quad(cmd, pass, QuadRect{});

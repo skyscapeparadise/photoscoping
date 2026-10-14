@@ -68,6 +68,10 @@ private:
     // the result is encoded to.
     void prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, float dt);
     void composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale);
+    // Whether the nebula is on screen to be seen churning. Not while the
+    // panel is away, nor while the window is minimized or covered: a sky
+    // nobody can see is a GPU kept awake for nothing.
+    bool churning() const;
     bool build_atlases();
 
     // Live resizing on macOS runs inside the system's own event loop, and the
@@ -102,6 +106,9 @@ private:
     std::int64_t target_ = 0;
     Uint64 next_due_ = 0;
     Uint64 last_tick_ = 0;
+    // Seconds the nebula has churned. Advanced only while it is churning, so
+    // it pauses where it was rather than leaping on when it comes back.
+    float nebula_time_ = 0.0f;
 };
 
 }  // namespace ps::app

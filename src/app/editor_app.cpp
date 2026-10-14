@@ -17,6 +17,11 @@ namespace {
 constexpr float kLargeIcon = 66.0f;
 constexpr float kSmallIcon = 24.0f;
 
+// How often an otherwise idle window redraws to move the nebula. It drifts
+// slowly enough that this reads as smooth, at a quarter of the frames a
+// 120Hz display would otherwise draw.
+constexpr Sint32 kChurnIntervalMs = 33;
+
 constexpr int kMinWindowWidth = 640;
 constexpr int kMinWindowHeight = 400;
 
@@ -259,6 +264,7 @@ void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, 
     root_.layout(static_cast<float>(lw), static_cast<float>(lh));
     input_.update(root_);
     animating_ = root_.tick(dt);
+    if (churning()) nebula_time_ += dt;
     // The tick can move the panel; lay out again so what is drawn is where
     // the animation has got to, not where it was a frame ago.
     if (animating_) root_.layout(static_cast<float>(lw), static_cast<float>(lh));
@@ -275,7 +281,12 @@ void EditorApp::composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale) {
                   viewer_background());
     const gpu::Rect panel = root_.panel_rect();
     nebula_.draw(cmd, gpu_->linear_target(), to_device(panel, scale), panel.w, panel.h,
-                 root_.panel_width());
+                 root_.panel_width(), nebula_time_);
+}
+
+bool EditorApp::churning() const {
+    const SDL_WindowFlags hidden = SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_OCCLUDED;
+    return root_.panel_rect().w > 0.0f && (SDL_GetWindowFlags(gpu_->window()) & hidden) == 0;
 }
 
 bool EditorApp::render() {
@@ -326,15 +337,18 @@ void EditorApp::run() {
     while (running_) {
         SDL_Event event;
         // Block for input when nothing is moving; while playing, wake for the
-        // next frame; while something animates, keep going.
+        // next frame; while the nebula churns, wake often enough to move it;
+        // while something animates, keep going.
         bool got = false;
         if (playing_) {
             const Uint64 now = SDL_GetTicksNS();
-            const Sint32 wait =
-                next_due_ > now ? static_cast<Sint32>((next_due_ - now) / 1000000) : 0;
+            Sint32 wait = next_due_ > now ? static_cast<Sint32>((next_due_ - now) / 1000000) : 0;
+            if (churning()) wait = std::min(wait, kChurnIntervalMs);
             got = SDL_WaitEventTimeout(&event, wait);
         } else if (animating_) {
             got = SDL_PollEvent(&event);
+        } else if (churning()) {
+            got = SDL_WaitEventTimeout(&event, kChurnIntervalMs);
         } else {
             got = SDL_WaitEvent(&event);
         }
