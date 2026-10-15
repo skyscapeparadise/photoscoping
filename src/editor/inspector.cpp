@@ -59,6 +59,9 @@ void Inspector::build(ui::FontCache& fonts, const gpu::IconAtlas& atlas) {
 
     rows_ = card_->add<ui::Node>();
 
+    views_ = add<ViewSwitch>();
+    views_->build(fonts);
+
     set_clip(ClipInfo{"no clip", {}});
 }
 
@@ -104,7 +107,11 @@ void Inspector::layout_self() {
     card_->x = margin;
     card_->y = tools_->y + tools_->height + margin;
     card_->width = inner;
-    card_->height = std::max(0.0f, height - card_->y - margin);
+    views_->x = margin;
+    views_->width = inner;
+    views_->height = ViewSwitch::kHeight;
+    views_->y = std::max(card_->y, height - margin - ViewSwitch::kHeight);
+    card_->height = std::max(0.0f, views_->y - margin - card_->y);
 
     // Inside the card. Type scales with the card's width -- the clip's name
     // is the one thing here meant to be read from across the room.

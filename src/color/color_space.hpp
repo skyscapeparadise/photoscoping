@@ -29,6 +29,7 @@ enum class Transfer {
     kHlg,       // ARIB STD-B67 / BT.2100 HLG, through the 1000-nit reference OOTF
     kGamma26,   // DCI cinema
     kLinear,
+    kSrgb,      // IEC 61966-2-1: what an image tool writes, and our own renders
 };
 
 const char* gamut_name(Gamut gamut);

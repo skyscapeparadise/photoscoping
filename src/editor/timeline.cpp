@@ -233,6 +233,12 @@ void Timeline::set_playing(bool playing) {
     refresh_transport();
 }
 
+void Timeline::set_matted_frames(std::int64_t frames) {
+    matted_frames_ = std::max<std::int64_t>(0, frames);
+    built_width_ = -1.0f;  // the strip is part of the ruler
+    refresh_playhead();
+}
+
 void Timeline::layout_self() {
     const bool show_clock = width - kTimecodeWidth - kTransportWidth >= kMinRuler;
     const float right = kTransportWidth + (show_clock ? kTimecodeWidth : 0.0f);
@@ -319,6 +325,15 @@ void Timeline::rebuild_ruler() {
     clip_span_->height = kHeight;
     clip_span_->fill = theme::kClipSpan;
     clip_span_->width = static_cast<float>(frame_seconds(frame_count_)) * pixels_per_second_;
+    if (matted_frames_ > 0) {
+        auto* matted = ticks_->add<ui::RectNode>();
+        matted->y = 1.0f;
+        matted->height = 3.0f;
+        matted->fill = theme::kHover;
+        matted->width =
+            static_cast<float>(frame_seconds(std::min(matted_frames_, frame_count_))) *
+            pixels_per_second_;
+    }
     ticks_->width = w;
 
     for (int i = first; i <= last; ++i) {

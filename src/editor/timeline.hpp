@@ -31,6 +31,9 @@ public:
     void set_clip(double fps, std::int64_t frame_count);
     void set_frame(std::int64_t frame);
     void set_playing(bool playing);
+    // How many of the clip's frames, from the first, have a matte. Marked
+    // along the top of the ruler.
+    void set_matted_frames(std::int64_t frames);
 
     std::function<void(std::int64_t)> on_seek;
     std::function<void(bool)> on_play;   // true to play, false to pause
@@ -56,6 +59,7 @@ private:
     double fps_ = 24.0;
     std::int64_t frame_count_ = 0;
     std::int64_t frame_ = 0;
+    std::int64_t matted_frames_ = 0;
     bool playing_ = false;
     bool fit_pending_ = false;
 

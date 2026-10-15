@@ -6,6 +6,7 @@
 #include <functional>
 #include <string>
 
+#include "app/lockstep_stream.hpp"
 #include "editor/editor_window.hpp"
 #include "editor/inspector.hpp"
 #include "gpu/display_pass.hpp"
@@ -36,6 +37,10 @@ public:
         // for every frame, since the signal is described per frame.
         std::function<gpu::InputTransform()> transform;
         editor::ClipInfo info;
+        // Renders of the clip from tools/matte_clip.py, frame for frame: its
+        // matte and its matted subject. Empty when there are none.
+        std::string matte_path;
+        std::string subject_path;
     };
 
     EditorApp() = default;
@@ -46,6 +51,10 @@ public:
     // `gpu` and `ingest` are the caller's and must outlive this.
     bool create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Clip clip);
     void destroy();
+
+    // Switches the viewer by the view's name. False for a name that is not a
+    // view, or a view with nothing to show.
+    bool set_view(const std::string& name);
 
     // Runs until the window closes.
     void run();
@@ -83,6 +92,10 @@ private:
     gpu::GpuContext* gpu_ = nullptr;
     gpu::IngestPass* ingest_ = nullptr;
     Clip clip_;
+
+    LockstepStream matte_;
+    LockstepStream subject_;
+    editor::View view_ = editor::View::kFootage;
 
     gpu::DisplayPass display_;
     gpu::NebulaPass nebula_;

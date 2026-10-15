@@ -131,6 +131,7 @@ add_library(photoscoping_ui STATIC
     src/ui/text.cpp
     src/ui/layout.cpp
     src/editor/tool_strip.cpp
+    src/editor/view_switch.cpp
     src/editor/timeline.cpp
     src/editor/inspector.cpp
     src/editor/editor_window.cpp
@@ -145,7 +146,7 @@ target_link_libraries(photoscoping_ui PUBLIC
     SDL3_image::SDL3_image
 )
 
-add_executable(photoscoping src/main.cpp src/app/editor_app.cpp)
+add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep_stream.cpp)
 target_link_libraries(photoscoping PRIVATE photoscoping_ui)
 
 if(APPLE)

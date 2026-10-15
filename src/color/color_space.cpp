@@ -116,6 +116,7 @@ const char* transfer_name(Transfer transfer) {
         case Transfer::kHlg:     return "HLG";
         case Transfer::kGamma26: return "gamma 2.6";
         case Transfer::kLinear:  return "linear";
+        case Transfer::kSrgb:    return "sRGB";
     }
     return "?";
 }
@@ -146,6 +147,10 @@ float decode_channel(Transfer transfer, float signal) {
             return std::pow(std::max(signal, 0.0f), 2.6f);
         case Transfer::kLinear:
             return signal;
+        case Transfer::kSrgb: {
+            const float s = std::max(signal, 0.0f);
+            return s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
+        }
         case Transfer::kPq: {
             const float p = std::pow(std::max(signal, 0.0f), 1.0f / kPqM2);
             const float nits =

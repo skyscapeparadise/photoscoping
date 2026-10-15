@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "editor/tool_strip.hpp"
+#include "editor/view_switch.hpp"
 #include "gpu/icon_atlas.hpp"
 #include "ui/font.hpp"
 #include "ui/node.hpp"
@@ -20,8 +21,8 @@ struct ClipInfo {
     std::vector<std::pair<std::string, std::string>> rows;
 };
 
-// The panel to the right of the viewer: the tool strip above a card, in the
-// shape of understory's inspector. Draws no background of its own -- the
+// The panel to the right of the viewer: the tool strip above a card, and the
+// view switch below it, in the shape of understory's inspector. Draws no background of its own -- the
 // nebula is a GPU pass underneath it, so everything here is outline and type
 // over that.
 //
@@ -33,6 +34,7 @@ public:
     void build(ui::FontCache& fonts, const gpu::IconAtlas& atlas);
 
     ToolStrip* tools() const { return tools_; }
+    ViewSwitch* views() const { return views_; }
     void set_clip(const ClipInfo& info);
 
 protected:
@@ -48,6 +50,7 @@ private:
 
     ui::FontCache* fonts_ = nullptr;
     ToolStrip* tools_ = nullptr;
+    ViewSwitch* views_ = nullptr;
     ui::RectNode* card_ = nullptr;
     ui::TextNode* heading_ = nullptr;
     ui::TextNode* title_ = nullptr;

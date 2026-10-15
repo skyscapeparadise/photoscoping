@@ -109,6 +109,19 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Clip clip)
     root_.build(fonts_, large_icons_, small_icons_);
     root_.inspector()->set_clip(clip_.info);
 
+    // A render that will not open is left out with a word in the log, not
+    // treated as fatal: the footage is still worth looking at without it.
+    if (!clip_.matte_path.empty() &&
+        !matte_.open(gpu.device(), clip_.matte_path, LockstepStream::Kind::kCoverage))
+        SDL_Log("cannot open the matte %s", clip_.matte_path.c_str());
+    if (!clip_.subject_path.empty() &&
+        !subject_.open(gpu.device(), clip_.subject_path, LockstepStream::Kind::kPicture))
+        SDL_Log("cannot open the subject %s", clip_.subject_path.c_str());
+    editor::ViewSwitch* views = root_.inspector()->views();
+    views->set_available(matte_.is_open(), subject_.is_open());
+    views->on_view_changed = [this](editor::View view) { view_ = view; };
+    root_.timeline()->set_matted_frames(matte_.frame_count());
+
     editor::Timeline* timeline = root_.timeline();
     if (clip_.decoder) {
         timeline->set_clip(clip_.decoder->frame_rate(), clip_.decoder->frame_count());
@@ -139,6 +152,8 @@ void EditorApp::destroy() {
     // The interface holds text that belongs to the font cache's engine, so
     // the tree goes first.
     root_.clear_children();
+    matte_.destroy();
+    subject_.destroy();
     large_icons_.destroy();
     small_icons_.destroy();
     fonts_.destroy();
@@ -156,6 +171,18 @@ bool EditorApp::build_atlases() {
                               static_cast<int>(std::ceil(kLargeIcon * atlas_scale_))) &&
            small_icons_.build(gpu_->device(), dir.c_str(),
                               static_cast<int>(std::ceil(kSmallIcon * atlas_scale_)));
+}
+
+bool EditorApp::set_view(const std::string& name) {
+    editor::ViewSwitch* views = root_.inspector()->views();
+    for (editor::View view : {editor::View::kFootage, editor::View::kMatte,
+                              editor::View::kSubject, editor::View::kOverlay}) {
+        if (name != editor::view_label(view)) continue;
+        if (!views->available(view)) return false;
+        views->set_view(view);
+        return true;
+    }
+    return false;
 }
 
 void EditorApp::set_playing(bool playing) {
@@ -200,6 +227,10 @@ void EditorApp::handle(const SDL_Event& event) {
                 case SDLK_TAB:
                     if (!event.key.repeat) root_.toggle_panel();
                     break;
+                case SDLK_1: root_.inspector()->views()->set_view(editor::View::kFootage); break;
+                case SDLK_2: root_.inspector()->views()->set_view(editor::View::kMatte); break;
+                case SDLK_3: root_.inspector()->views()->set_view(editor::View::kSubject); break;
+                case SDLK_4: root_.inspector()->views()->set_view(editor::View::kOverlay); break;
                 default: break;
             }
             break;
@@ -275,10 +306,28 @@ void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, 
 }
 
 void EditorApp::composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale) {
-    const bool have_frame = clip_.decoder && ingest_->working();
-    display_.draw(cmd, gpu_->linear_target(), to_device(root_.viewer_rect(), scale),
-                  have_frame ? ingest_->working() : nullptr, ingest_->width(), ingest_->height(),
-                  viewer_background());
+    gpu::DisplayPass::Frame frame;
+    gpu::DisplayView view = gpu::DisplayView::kFootage;
+    if (clip_.decoder && ingest_->working()) {
+        frame.working = ingest_->working();
+        frame.width = ingest_->width();
+        frame.height = ingest_->height();
+        // Only what the view reads is decoded, so the footage view plays
+        // as fast as it did before there were renders to keep up with.
+        const std::int64_t at = clip_.decoder->frame_index();
+        const bool wants_matte = view_ != editor::View::kFootage;
+        if (wants_matte && matte_.sync(cmd, at)) frame.matte = matte_.working();
+        if (view_ == editor::View::kSubject && subject_.sync(cmd, at))
+            frame.subject = subject_.working();
+        switch (view_) {
+            case editor::View::kFootage: view = gpu::DisplayView::kFootage; break;
+            case editor::View::kMatte: view = gpu::DisplayView::kMatte; break;
+            case editor::View::kSubject: view = gpu::DisplayView::kSubject; break;
+            case editor::View::kOverlay: view = gpu::DisplayView::kOverlay; break;
+        }
+    }
+    display_.draw(cmd, gpu_->linear_target(), to_device(root_.viewer_rect(), scale), frame, view,
+                  scale, viewer_background());
     const gpu::Rect panel = root_.panel_rect();
     nebula_.draw(cmd, gpu_->linear_target(), to_device(panel, scale), panel.w, panel.h,
                  root_.panel_width(), nebula_time_);

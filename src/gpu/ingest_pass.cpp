@@ -9,6 +9,19 @@
 
 namespace ps::gpu {
 
+InputTransform transform_from_tags(const media::SignalInfo& s) {
+    InputTransform t;
+    t.matrix = s.matrix;
+    t.range = s.range;
+    t.gamut = s.primaries == "bt2020" ? color::Gamut::kRec2020 : color::Gamut::kRec709;
+    if (s.transfer == "smpte2084") t.transfer = color::Transfer::kPq;
+    else if (s.transfer == "arib-std-b67") t.transfer = color::Transfer::kHlg;
+    else if (s.transfer == "linear") t.transfer = color::Transfer::kLinear;
+    else if (s.transfer == "iec61966-2-1") t.transfer = color::Transfer::kSrgb;
+    else t.transfer = color::Transfer::kBt1886;
+    return t;
+}
+
 namespace {
 
 // Linear light needs float, and half float is enough: 11 bits of mantissa

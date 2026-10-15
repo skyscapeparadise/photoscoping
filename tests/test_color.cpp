@@ -61,6 +61,12 @@ void test_transfers() {
 
     CHECK(near(decode_channel(Transfer::kBt1886, 1.0f), 1.0f, 1e-6f));
     CHECK(near(decode_channel(Transfer::kBt1886, 0.5f), std::pow(0.5f, 2.4f), 1e-6f));
+
+    // sRGB: linear below the knee, then the offset power curve; 18% grey
+    // encodes to about 0.461.
+    CHECK(near(decode_channel(Transfer::kSrgb, 0.04f), 0.04f / 12.92f, 1e-7f));
+    CHECK(near(decode_channel(Transfer::kSrgb, 0.4613f), 0.18f, 2e-4f));
+    CHECK(near(decode_channel(Transfer::kSrgb, 1.0f), 1.0f, 1e-6f));
 }
 
 void test_ycbcr() {

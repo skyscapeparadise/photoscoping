@@ -37,13 +37,17 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def encoder(path: pathlib.Path, w: int, h: int, fps: float, pix_fmt: str,
-            audio_from: pathlib.Path | None) -> subprocess.Popen:
+            audio_from: pathlib.Path | None, trc: str = "bt709") -> subprocess.Popen:
+    """`trc` names the curve the frames were actually encoded with. The
+    composite is sRGB-encoded, and tagging it bt709 had everything that reads
+    tags -- photoscoping's viewer, most players -- decode it with gamma 2.4,
+    which darkens its mids by several levels against the footage."""
     cmd = ["ffmpeg", "-v", "error", "-y",
            "-f", "rawvideo", "-pix_fmt", pix_fmt, "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "-"]
     if audio_from:
         cmd += ["-i", str(audio_from), "-map", "0:v", "-map", "1:a?", "-c:a", "copy", "-shortest"]
     cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "14", "-pix_fmt", "yuv420p",
-            "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+            "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", trc,
             "-color_range", "tv", "-movflags", "+faststart", str(path)]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
@@ -76,7 +80,8 @@ def main() -> int:
     model = BiRefNet("BiRefNet HR-matting @2048²", "ZhengPeng7/BiRefNet_HR-matting", (2048, 2048))
     model.load(device)
 
-    comp_out = encoder(args.out / f"{name}_comp.mp4", w, h, fps, "rgb24", args.clip)
+    comp_out = encoder(args.out / f"{name}_comp.mp4", w, h, fps, "rgb24", args.clip,
+                       trc="iec61966-2-1")
     matte_out = encoder(args.out / f"{name}_matte.mp4", w, h, fps, "gray", None)
 
     stats = []

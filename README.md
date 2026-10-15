@@ -26,6 +26,13 @@ takes what the inspector and timeline leave, the inspector can be dragged
 wider or narrower by its left edge, and it folds away when the window gets
 too narrow for both. `--window WxH` opens at a given size and
 `--screenshot FILE` renders the window once to a PNG and exits.
+If `tools/matte_clip.py` has rendered the clip (into `renders/`, or wherever
+`--mattes DIR` points), the viewer can show it four ways: the footage, the
+matte, the matted subject over a checkerboard, or the footage washed purple
+wherever the matte drops it. The pills under the inspector switch between
+them, as do the keys 1-4, and a lilac line along the top of the ruler marks
+the frames that have a matte.
+
 `--probe` prints the working-space values of a frame instead of opening a
 window, and `--bench N` times decode and ingest over N frames.
 

@@ -13,6 +13,7 @@ struct CubeLut;
 }
 namespace ps::media {
 class VideoDecoder;
+struct SignalInfo;
 }
 
 namespace ps::gpu {
@@ -27,6 +28,9 @@ struct InputTransform {
     color::Transfer transfer = color::Transfer::kBt1886;
     bool use_lut = false;
 };
+
+// What a file's own tags say, for a clip with no LUT in front of it.
+InputTransform transform_from_tags(const media::SignalInfo& signal);
 
 // Uploads a decoded frame's planes and converts them into the working image:
 // linear light, Rec.2020, 1.0 = reference white, at the source's resolution.

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <optional>
 #include <string>
 
@@ -25,6 +26,8 @@ struct Options {
     int bench = 0;
     bool software = false;
     std::string screenshot;
+    std::string mattes = "renders";
+    std::string view;
     int window_w = 1440;
     int window_h = 900;
 };
@@ -42,12 +45,15 @@ void usage() {
         "                 a header line \"PSRAW <w> <h> <frames> <fps>\", then\n"
         "                 each frame as w*h RGBA half floats (linear Rec.2020)\n"
         "  --software     decode on the CPU instead of VideoToolbox\n"
+        "  --mattes DIR   where tools/matte_clip.py wrote this clip's renders\n"
+        "                 (default: renders)\n"
+        "  --view NAME    open on footage, matte, subject or overlay\n"
         "  --window WxH   open the window at this size (default 1440x900)\n"
         "  --screenshot FILE\n"
         "                 render the window once, write it as PNG and exit\n"
         "\n"
         "keys: space play/pause, left/right step a frame, home first frame,\n"
-        "      tab show or hide the inspector\n");
+        "      1-4 footage, matte, subject, overlay, tab show or hide the inspector\n");
 }
 
 std::optional<Options> parse_args(int argc, char** argv) {
@@ -78,6 +84,14 @@ std::optional<Options> parse_args(int argc, char** argv) {
             if (o.bench <= 0) return std::nullopt;
         } else if (a == "--software") {
             o.software = true;
+        } else if (a == "--mattes") {
+            const char* v = value();
+            if (!v) return std::nullopt;
+            o.mattes = v;
+        } else if (a == "--view") {
+            const char* v = value();
+            if (!v) return std::nullopt;
+            o.view = v;
         } else if (a == "--screenshot") {
             const char* v = value();
             if (!v) return std::nullopt;
@@ -98,22 +112,9 @@ std::optional<Options> parse_args(int argc, char** argv) {
     return o;
 }
 
-// Without a LUT the file's own tags describe the signal.
-ps::gpu::InputTransform transform_from_tags(const ps::media::SignalInfo& s) {
-    ps::gpu::InputTransform t;
-    t.matrix = s.matrix;
-    t.range = s.range;
-    t.gamut = s.primaries == "bt2020" ? ps::color::Gamut::kRec2020 : ps::color::Gamut::kRec709;
-    if (s.transfer == "smpte2084") t.transfer = ps::color::Transfer::kPq;
-    else if (s.transfer == "arib-std-b67") t.transfer = ps::color::Transfer::kHlg;
-    else if (s.transfer == "linear") t.transfer = ps::color::Transfer::kLinear;
-    else t.transfer = ps::color::Transfer::kBt1886;
-    return t;
-}
-
 ps::gpu::InputTransform transform_for(const ps::media::SignalInfo& s,
                                       const std::optional<ps::color::CubeLut>& lut) {
-    ps::gpu::InputTransform t = transform_from_tags(s);
+    ps::gpu::InputTransform t = ps::gpu::transform_from_tags(s);
     if (lut) {
         t.use_lut = true;
         if (lut->output) {
@@ -216,8 +217,15 @@ std::string clip_name(const std::string& path) {
     return name;
 }
 
+// One of the clip's renders from tools/matte_clip.py, if it is there.
+std::string render_path(const std::string& dir, const std::string& name, const char* suffix) {
+    std::error_code ec;
+    const std::filesystem::path path = std::filesystem::path(dir) / (name + suffix);
+    return std::filesystem::exists(path, ec) ? path.string() : std::string();
+}
+
 ps::editor::ClipInfo clip_info(const std::string& name, const ps::media::VideoDecoder& d,
-                               const std::string& lut_path) {
+                               const std::string& lut_path, bool matted) {
     ps::editor::ClipInfo info;
     info.name = name;
     char text[64];
@@ -233,6 +241,7 @@ ps::editor::ClipInfo clip_info(const std::string& name, const ps::media::VideoDe
     info.rows.emplace_back("codec", d.codec_name());
     info.rows.emplace_back("decode", d.hardware_decoding() ? "videotoolbox" : "software");
     info.rows.emplace_back("input", lut_path.empty() ? "file tags" : clip_name(lut_path));
+    info.rows.emplace_back("matte", matted ? "rendered" : "none");
     return info;
 }
 
@@ -390,12 +399,17 @@ int main(int argc, char** argv) {
         clip.decoder = &decoder;
         clip.name = clip_name(options->clip);
         clip.transform = [&decoder, &lut] { return transform_for(decoder.signal(), lut); };
-        clip.info = clip_info(clip.name, decoder, options->lut);
+        clip.matte_path = render_path(options->mattes, clip.name, "_matte.mp4");
+        clip.subject_path = render_path(options->mattes, clip.name, "_comp.mp4");
+        clip.info = clip_info(clip.name, decoder, options->lut, !clip.matte_path.empty());
     }
     int status = 0;
     {
         ps::app::EditorApp app;
         if (!app.create(gpu, ingest, std::move(clip))) {
+            status = 1;
+        } else if (!options->view.empty() && !app.set_view(options->view)) {
+            std::fprintf(stderr, "no %s view for this clip\n", options->view.c_str());
             status = 1;
         } else if (!options->screenshot.empty()) {
             const bool ok = app.screenshot(options->screenshot.c_str());
