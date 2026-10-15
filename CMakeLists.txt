@@ -146,7 +146,8 @@ target_link_libraries(photoscoping_ui PUBLIC
     SDL3_image::SDL3_image
 )
 
-add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep_stream.cpp)
+add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep_stream.cpp
+                            src/app/matte_frames.cpp src/app/matte_job.cpp)
 target_link_libraries(photoscoping PRIVATE photoscoping_ui)
 
 if(APPLE)

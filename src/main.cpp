@@ -4,7 +4,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <optional>
 #include <string>
 
@@ -217,15 +216,8 @@ std::string clip_name(const std::string& path) {
     return name;
 }
 
-// One of the clip's renders from tools/matte_clip.py, if it is there.
-std::string render_path(const std::string& dir, const std::string& name, const char* suffix) {
-    std::error_code ec;
-    const std::filesystem::path path = std::filesystem::path(dir) / (name + suffix);
-    return std::filesystem::exists(path, ec) ? path.string() : std::string();
-}
-
 ps::editor::ClipInfo clip_info(const std::string& name, const ps::media::VideoDecoder& d,
-                               const std::string& lut_path, bool matted) {
+                               const std::string& lut_path) {
     ps::editor::ClipInfo info;
     info.name = name;
     char text[64];
@@ -241,7 +233,8 @@ ps::editor::ClipInfo clip_info(const std::string& name, const ps::media::VideoDe
     info.rows.emplace_back("codec", d.codec_name());
     info.rows.emplace_back("decode", d.hardware_decoding() ? "videotoolbox" : "software");
     info.rows.emplace_back("input", lut_path.empty() ? "file tags" : clip_name(lut_path));
-    info.rows.emplace_back("matte", matted ? "rendered" : "none");
+    // Filled in by the app, which knows what has been matted.
+    info.rows.emplace_back("matte", "none");
     return info;
 }
 
@@ -399,9 +392,10 @@ int main(int argc, char** argv) {
         clip.decoder = &decoder;
         clip.name = clip_name(options->clip);
         clip.transform = [&decoder, &lut] { return transform_for(decoder.signal(), lut); };
-        clip.matte_path = render_path(options->mattes, clip.name, "_matte.mp4");
-        clip.subject_path = render_path(options->mattes, clip.name, "_comp.mp4");
-        clip.info = clip_info(clip.name, decoder, options->lut, !clip.matte_path.empty());
+        clip.path = options->clip;
+        clip.lut_path = options->lut;
+        clip.render_dir = options->mattes;
+        clip.info = clip_info(clip.name, decoder, options->lut);
     }
     int status = 0;
     {

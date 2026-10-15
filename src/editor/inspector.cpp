@@ -62,6 +62,23 @@ void Inspector::build(ui::FontCache& fonts, const gpu::IconAtlas& atlas) {
     views_ = add<ViewSwitch>();
     views_->build(fonts);
 
+    action_ = add<ui::RectNode>();
+    action_->height = ViewSwitch::kPillHeight;
+    action_->radius = ViewSwitch::kPillHeight * 0.5f;
+    action_->border_width = 2.0f;
+    action_->border_color.set_behavior(0.08f, ui::Easing::kInOutQuad);
+    action_label_ = action_->add<ui::TextNode>();
+    action_label_->set_font_cache(&fonts);
+    action_label_->pixel_size = 18.0f;
+    action_label_->anchors = ui::Anchors::Fill();
+    action_label_->h_align = ui::HAlign::kCenter;
+    action_label_->v_align = ui::VAlign::kCenter;
+    action_->on_hover_changed = [this](bool) { refresh_action(); };
+    action_->on_click = [this] {
+        if (action_enabled_ && on_action) on_action();
+    };
+    set_action("matte clip", false);
+
     set_clip(ClipInfo{"no clip", {}});
 }
 
@@ -69,6 +86,29 @@ void Inspector::set_clip(const ClipInfo& info) {
     info_ = info;
     title_->set_text(info_.name);
     rebuild_rows();
+}
+
+void Inspector::set_row(const std::string& label, const std::string& value) {
+    for (std::size_t i = 0; i < info_.rows.size(); ++i) {
+        if (info_.rows[i].first != label) continue;
+        info_.rows[i].second = value;
+        if (i < row_nodes_.size()) row_nodes_[i].value->set_text(value);
+        return;
+    }
+}
+
+void Inspector::set_action(const std::string& label, bool enabled) {
+    action_label_->set_text(label);
+    action_enabled_ = enabled;
+    refresh_action();
+}
+
+void Inspector::refresh_action() {
+    const gpu::Color c = !action_enabled_     ? theme::kDormant
+                         : action_->hovered() ? theme::kHover
+                                              : theme::kWhite;
+    action_->border_color = c;
+    action_label_->color = action_enabled_ ? theme::kWhite : theme::kDormant;
 }
 
 void Inspector::rebuild_rows() {
@@ -111,7 +151,10 @@ void Inspector::layout_self() {
     views_->width = inner;
     views_->height = ViewSwitch::kHeight;
     views_->y = std::max(card_->y, height - margin - ViewSwitch::kHeight);
-    card_->height = std::max(0.0f, views_->y - margin - card_->y);
+    action_->x = margin;
+    action_->width = inner;
+    action_->y = std::max(card_->y, views_->y - ViewSwitch::kGap - ViewSwitch::kPillHeight);
+    card_->height = std::max(0.0f, action_->y - margin - card_->y);
 
     // Inside the card. Type scales with the card's width -- the clip's name
     // is the one thing here meant to be read from across the room.

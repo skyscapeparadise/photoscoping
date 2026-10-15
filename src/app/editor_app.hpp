@@ -7,6 +7,8 @@
 #include <string>
 
 #include "app/lockstep_stream.hpp"
+#include "app/matte_frames.hpp"
+#include "app/matte_job.hpp"
 #include "editor/editor_window.hpp"
 #include "editor/inspector.hpp"
 #include "gpu/display_pass.hpp"
@@ -37,10 +39,13 @@ public:
         // for every frame, since the signal is described per frame.
         std::function<gpu::InputTransform()> transform;
         editor::ClipInfo info;
-        // Renders of the clip from tools/matte_clip.py, frame for frame: its
-        // matte and its matted subject. Empty when there are none.
-        std::string matte_path;
-        std::string subject_path;
+        // Where the clip and its LUT are, for the matting tool, which opens
+        // them itself. The LUT may be empty.
+        std::string path;
+        std::string lut_path;
+        // Where tools/matte_clip.py writes this clip's renders and reads
+        // them back from.
+        std::string render_dir;
     };
 
     EditorApp() = default;
@@ -79,7 +84,10 @@ private:
     void composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale);
     // Whether the nebula is on screen to be seen churning. Not while the
     // panel is away, nor while the window is minimized or covered: a sky
-    // nobody can see is a GPU kept awake for nothing.
+    // nobody can see is a GPU kept awake for nothing. And not while the clip
+    // is being matted, which shares the GPU and needs it more. (One
+    // measurement had a churning sky slowing the matting fourfold; a second
+    // found no difference. Holding the sky still is cheap either way.)
     bool churning() const;
     bool build_atlases();
 
@@ -93,8 +101,28 @@ private:
     gpu::IngestPass* ingest_ = nullptr;
     Clip clip_;
 
+    // Where the matte on screen comes from. The finished videos play
+    // smoothly and carry the subject; the per-frame PNGs are there while a
+    // run is going or after one stopped short, and are whichever is newer.
+    enum class MatteSource { kNone, kVideos, kFrames };
+
+    std::string render_path(const char* suffix) const;
+    void open_videos();
+    void choose_matte_source();
+    // Brings the card, the pill, the ruler and the views into line with the
+    // matte and the job.
+    void refresh_matte_ui();
+    void toggle_job();
+    void poll_job();
+
     LockstepStream matte_;
     LockstepStream subject_;
+    MatteFrames frames_;
+    MatteJob job_;
+    MatteSource source_ = MatteSource::kNone;
+    Uint64 job_started_ns_ = 0;
+    std::int64_t done_at_start_ = 0;
+    Uint64 last_poll_ns_ = 0;
     editor::View view_ = editor::View::kFootage;
 
     gpu::DisplayPass display_;

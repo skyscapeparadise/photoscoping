@@ -33,6 +33,13 @@ wherever the matte drops it. The pills under the inspector switch between
 them, as do the keys 1-4, and a lilac line along the top of the ruler marks
 the frames that have a matte.
 
+The pill above them runs the matting from inside the app: it starts
+`tools/matte_clip.py` in the background (from the checkout's `.venv`), and
+the ruler fills in as each frame's matte lands in `renders/<clip>_mattes/`.
+Stopping it, or closing the window, keeps every finished frame; resuming
+picks up from there. The finished videos replace the old ones only once the
+whole clip is done. The tool's output goes to `renders/<clip>_matte.log`.
+
 `--probe` prints the working-space values of a frame instead of opening a
 window, and `--bench N` times decode and ingest over N frames.
 

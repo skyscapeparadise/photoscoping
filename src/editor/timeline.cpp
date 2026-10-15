@@ -233,8 +233,9 @@ void Timeline::set_playing(bool playing) {
     refresh_transport();
 }
 
-void Timeline::set_matted_frames(std::int64_t frames) {
-    matted_frames_ = std::max<std::int64_t>(0, frames);
+void Timeline::set_matted(const std::vector<bool>& matted) {
+    if (matted == matted_) return;
+    matted_ = matted;
     built_width_ = -1.0f;  // the strip is part of the ruler
     refresh_playhead();
 }
@@ -325,14 +326,20 @@ void Timeline::rebuild_ruler() {
     clip_span_->height = kHeight;
     clip_span_->fill = theme::kClipSpan;
     clip_span_->width = static_cast<float>(frame_seconds(frame_count_)) * pixels_per_second_;
-    if (matted_frames_ > 0) {
-        auto* matted = ticks_->add<ui::RectNode>();
-        matted->y = 1.0f;
-        matted->height = 3.0f;
-        matted->fill = theme::kHover;
-        matted->width =
-            static_cast<float>(frame_seconds(std::min(matted_frames_, frame_count_))) *
-            pixels_per_second_;
+    // One mark per unbroken run of matted frames, rather than one per frame.
+    const auto runs = static_cast<std::int64_t>(std::min<std::size_t>(
+        matted_.size(), static_cast<std::size_t>(std::max<std::int64_t>(0, frame_count_))));
+    for (std::int64_t i = 0; i < runs;) {
+        if (!matted_[static_cast<std::size_t>(i)]) { ++i; continue; }
+        std::int64_t end = i;
+        while (end < runs && matted_[static_cast<std::size_t>(end)]) ++end;
+        auto* mark = ticks_->add<ui::RectNode>();
+        mark->x = static_cast<float>(frame_seconds(i)) * pixels_per_second_;
+        mark->y = 1.0f;
+        mark->height = 3.0f;
+        mark->fill = theme::kHover;
+        mark->width = static_cast<float>(frame_seconds(end - i)) * pixels_per_second_;
+        i = end;
     }
     ticks_->width = w;
 

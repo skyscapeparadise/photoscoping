@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,6 +37,13 @@ public:
     ToolStrip* tools() const { return tools_; }
     ViewSwitch* views() const { return views_; }
     void set_clip(const ClipInfo& info);
+    // Changes one row's value in place, by its label.
+    void set_row(const std::string& label, const std::string& value);
+
+    // The pill above the views that runs the matting. `enabled` false greys
+    // it out and ignores clicks.
+    void set_action(const std::string& label, bool enabled);
+    std::function<void()> on_action;
 
 protected:
     void layout_self() override;
@@ -57,6 +65,10 @@ private:
     ui::RectNode* rule_ = nullptr;
     ui::TextNode* caption_ = nullptr;
     ui::Node* rows_ = nullptr;
+    ui::RectNode* action_ = nullptr;
+    ui::TextNode* action_label_ = nullptr;
+    bool action_enabled_ = false;
+    void refresh_action();
     std::vector<Row> row_nodes_;
     ClipInfo info_;
 };
