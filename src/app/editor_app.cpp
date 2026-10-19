@@ -6,6 +6,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "app/tracking_ticker.hpp"
 #include "editor/theme.hpp"
 
 namespace ps::app {
@@ -465,8 +466,7 @@ void EditorApp::composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale) {
 
 bool EditorApp::churning() const {
     const SDL_WindowFlags hidden = SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_OCCLUDED;
-    return !job_.running() && root_.panel_rect().w > 0.0f &&
-           (SDL_GetWindowFlags(gpu_->window()) & hidden) == 0;
+    return root_.panel_rect().w > 0.0f && (SDL_GetWindowFlags(gpu_->window()) & hidden) == 0;
 }
 
 bool EditorApp::render() {
@@ -512,8 +512,19 @@ bool SDLCALL EditorApp::watch_events(void* self, SDL_Event* event) {
     return true;
 }
 
+void EditorApp::tracking_tick(void* self) {
+    auto* app = static_cast<EditorApp*>(self);
+    if (!app->running_) return;
+    app->poll_job();
+    app->decode_pending();
+    app->render();
+}
+
 void EditorApp::run() {
     running_ = true;
+#if defined(SDL_PLATFORM_APPLE)
+    start_tracking_ticker(&EditorApp::tracking_tick, this);
+#endif
     while (running_) {
         SDL_Event event;
         // Block for input when nothing is moving; while playing, wake for the
@@ -543,6 +554,9 @@ void EditorApp::run() {
         decode_pending();
         if (!running_ || !render()) break;
     }
+#if defined(SDL_PLATFORM_APPLE)
+    stop_tracking_ticker();
+#endif
     running_ = false;
 }
 

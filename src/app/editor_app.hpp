@@ -84,10 +84,7 @@ private:
     void composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale);
     // Whether the nebula is on screen to be seen churning. Not while the
     // panel is away, nor while the window is minimized or covered: a sky
-    // nobody can see is a GPU kept awake for nothing. And not while the clip
-    // is being matted, which shares the GPU and needs it more. (One
-    // measurement had a churning sky slowing the matting fourfold; a second
-    // found no difference. Holding the sky still is cheap either way.)
+    // nobody can see is a GPU kept awake for nothing.
     bool churning() const;
     bool build_atlases();
 
@@ -96,6 +93,9 @@ private:
     // live-resize expose from in there instead, and this redraws on it, so the
     // layout follows the window edge rather than stretching until release.
     static bool SDLCALL watch_events(void* self, SDL_Event* event);
+    // One frame's worth of the main loop's work, for when AppKit is running
+    // its own loop instead (see app/tracking_ticker.hpp).
+    static void tracking_tick(void* self);
 
     gpu::GpuContext* gpu_ = nullptr;
     gpu::IngestPass* ingest_ = nullptr;

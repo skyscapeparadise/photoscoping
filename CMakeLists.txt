@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(photoscoping VERSION 0.1.0 LANGUAGES CXX)
 
+# The run-loop hook that keeps the window drawing under AppKit's own loops is
+# Cocoa, so the Objective-C++ compiler is needed for that one file.
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -151,6 +157,9 @@ add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep
 target_link_libraries(photoscoping PRIVATE photoscoping_ui)
 
 if(APPLE)
+    target_sources(photoscoping PRIVATE src/app/tracking_ticker_mac.mm)
+    set_source_files_properties(src/app/tracking_ticker_mac.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(photoscoping PRIVATE "-framework Cocoa")
 endif()
 
