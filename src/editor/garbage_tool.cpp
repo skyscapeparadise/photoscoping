@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 #include "editor/lines.hpp"
 #include "editor/theme.hpp"
@@ -14,12 +15,14 @@ namespace {
 constexpr float kReach = 8.0f;
 constexpr float kHandle = 7.0f;
 
-// Squared distance from (x, y) to the segment a-b.
-float distance2(float x, float y, float ax, float ay, float bx, float by) {
+// Squared distance from (x, y) to the segment a-b, and how far along it the
+// nearest point is.
+float distance2(float x, float y, float ax, float ay, float bx, float by, float* along = nullptr) {
     const float dx = bx - ax, dy = by - ay;
     const float len2 = dx * dx + dy * dy;
     float t = len2 > 0.0f ? ((x - ax) * dx + (y - ay) * dy) / len2 : 0.0f;
     t = std::clamp(t, 0.0f, 1.0f);
+    if (along) *along = t;
     const float px = ax + t * dx - x, py = ay + t * dy - y;
     return px * px + py * py;
 }
@@ -86,7 +89,7 @@ bool GarbageTool::hit_point(float x, float y, int* id, int* index) const {
     return found;
 }
 
-int GarbageTool::hit_edge(float x, float y) const {
+int GarbageTool::hit_edge(float x, float y, int* edge, float* along) const {
     // Measured on screen, so the reach is the same at any zoom. The last
     // drawn is on top, so it is asked first.
     for (auto it = fixes_->garbage.rbegin(); it != fixes_->garbage.rend(); ++it) {
@@ -95,7 +98,12 @@ int GarbageTool::hit_edge(float x, float y) const {
             float ax = 0.0f, ay = 0.0f, bx = 0.0f, by = 0.0f;
             viewer_->from_image(pts[i].x, pts[i].y, &ax, &ay);
             viewer_->from_image(pts[(i + 1) % n].x, pts[(i + 1) % n].y, &bx, &by);
-            if (distance2(x, y, ax, ay, bx, by) <= kReach * kReach) return it->id;
+            float t = 0.0f;
+            if (distance2(x, y, ax, ay, bx, by, &t) <= kReach * kReach) {
+                if (edge) *edge = static_cast<int>(i);
+                if (along) *along = t;
+                return it->id;
+            }
         }
     }
     return 0;
@@ -121,22 +129,53 @@ void GarbageTool::press(float x, float y) {
     }
 
     int id = 0, index = 0;
+    if ((SDL_GetModState() & SDL_KMOD_ALT) != 0) {
+        // Option: points in and out, on every key.
+        if (hit_point(x, y, &id, &index)) {
+            select(id);
+            edited_ = false;
+            begin_edit();
+            if (fixes_->find(id)->remove_point(static_cast<std::size_t>(index), 3)) {
+                if (on_changed) on_changed();
+            }
+            edited_ = false;
+            return;
+        }
+        int edge = 0;
+        float along = 0.0f;
+        if (const int on = hit_edge(x, y, &edge, &along)) {
+            select(on);
+            edited_ = false;
+            begin_edit();
+            fixes_->find(on)->insert_point(static_cast<std::size_t>(edge), along);
+            if (on_changed) on_changed();
+            edited_ = false;
+            // And it can be dragged straight away, on this frame.
+            drag_ = Drag::kVertex;
+            drag_id_ = on;
+            drag_index_ = edge + 1;
+            return;
+        }
+        return;
+    }
     if (hit_point(x, y, &id, &index)) {
+        select(id);
         drag_ = Drag::kVertex;
-        drag_id_ = selected_ = id;
+        drag_id_ = id;
         drag_index_ = index;
         return;
     }
     if (const int id_edge = hit_edge(x, y)) {
+        select(id_edge);
         drag_ = Drag::kShape;
-        drag_id_ = selected_ = id_edge;
+        drag_id_ = id_edge;
         grab_x_ = ix;
         grab_y_ = iy;
         grabbed_ = fixes_->find(id_edge)->at(frame_);
         return;
     }
     // Nothing here: the start of a new shape.
-    selected_ = 0;
+    select(0);
     drawing_.push_back({ix, iy});
 }
 
@@ -178,7 +217,7 @@ void GarbageTool::close_shape() {
     if (drawing_.size() < 3) return;
     edited_ = false;
     begin_edit();
-    selected_ = fixes_->add_garbage(frame_, std::move(drawing_));
+    select(fixes_->add_garbage(frame_, std::move(drawing_)));
     drawing_.clear();
     if (on_changed) on_changed();
     edited_ = false;
@@ -212,7 +251,7 @@ bool GarbageTool::handle_key(SDL_Keycode key, SDL_Keymod mods) {
                                g->keys.size() == 1;
             if (whole) {
                 fixes_->remove_garbage(selected_);
-                selected_ = 0;
+                select(0);
             } else {
                 g->remove_key(frame_);
             }
@@ -220,9 +259,40 @@ bool GarbageTool::handle_key(SDL_Keycode key, SDL_Keymod mods) {
             edited_ = false;
             return true;
         }
+        case SDLK_LEFTBRACKET:
+        case SDLK_RIGHTBRACKET: {
+            fixes::Garbage* g = fixes_->find(selected_);
+            if (!g) return false;
+            // By a quarter each press; from nothing, ] starts at 4 pixels,
+            // and [ below 1 is nothing again.
+            float f = g->feather;
+            if (key == SDLK_RIGHTBRACKET) f = f < 4.0f ? 4.0f : std::min(f * 1.25f, 500.0f);
+            else f = f / 1.25f < 1.0f ? 0.0f : f / 1.25f;
+            edited_ = false;
+            begin_edit();
+            g->feather = f;
+            if (on_changed) on_changed();
+            edited_ = false;
+            if (on_heading_changed) on_heading_changed();
+            return true;
+        }
         default:
             return false;
     }
+}
+
+void GarbageTool::select(int id) {
+    if (selected_ == id) return;
+    selected_ = id;
+    if (on_heading_changed) on_heading_changed();
+}
+
+std::string GarbageTool::heading() const {
+    const fixes::Garbage* g = fixes_->find(selected_);
+    if (!g || g->feather <= 0.0f) return "garbage matte";
+    char text[48];
+    std::snprintf(text, sizeof text, "garbage \xC2\xB7 feather %.0f", g->feather);
+    return text;
 }
 
 void GarbageTool::paint_self(gpu::DrawList& draw, const ui::PaintContext& ctx) {

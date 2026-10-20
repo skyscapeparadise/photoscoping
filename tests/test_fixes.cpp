@@ -294,6 +294,49 @@ void test_blend_patch() {
     CHECK(alpha[10 * 100 + 10] == 0.0f);
 }
 
+void test_shape_editing() {
+    // A point put on an edge goes into every key, at the same share of the
+    // way along it, so the shape tweens as before.
+    Fixes f;
+    const int id = f.add_garbage(0, {{0, 0}, {100, 0}, {100, 100}, {0, 100}});
+    f.find(id)->set(10, {{0, 0}, {200, 0}, {200, 200}, {0, 200}});
+    Garbage& g = *f.find(id);
+    g.insert_point(0, 0.25f);
+    CHECK(g.point_count() == 5);
+    CHECK(g.keys[0].points[1] == (Point{25, 0}));
+    CHECK(g.keys[1].points[1] == (Point{50, 0}));
+    CHECK(g.at(5)[1] == (Point{37.5f, 0}));
+    // On the closing edge, from the last point back to the first.
+    g.insert_point(4, 0.5f);
+    CHECK(g.point_count() == 6 && g.keys[0].points[5] == (Point{0, 50}));
+    CHECK(g.remove_point(1, 3) && g.point_count() == 5 && g.keys[1].points[1] == (Point{200, 0}));
+    CHECK(g.remove_point(0, 3) && g.remove_point(0, 3));
+    CHECK(!g.remove_point(0, 3) && g.point_count() == 3);
+
+    // Feather: outside the shape, fading out over it; inside, untouched.
+    Fixes h;
+    const int sid = h.add_garbage(0, {{40, 40}, {60, 40}, {60, 60}, {40, 60}});
+    const std::vector<std::uint8_t> hard = garbage_mask(h, 0, 100, 100, 1.0f);
+    h.find(sid)->feather = 10.0f;
+    const std::vector<std::uint8_t> soft = garbage_mask(h, 0, 100, 100, 1.0f);
+    auto at = [](const std::vector<std::uint8_t>& m, int x, int y) { return m[y * 100 + x]; };
+    CHECK(at(hard, 50, 50) == 255 && at(soft, 50, 50) == 255);
+    CHECK(at(hard, 64, 50) == 0 && at(soft, 64, 50) > 60 && at(soft, 64, 50) < 200);
+    CHECK(at(soft, 62, 50) > at(soft, 66, 50));
+    CHECK(at(soft, 75, 50) == 0);
+    // Half-size masks feather half as far.
+    const std::vector<std::uint8_t> half = garbage_mask(h, 0, 50, 50, 0.5f);
+    CHECK(std::abs(int(half[25 * 50 + 32]) - int(at(soft, 64, 50))) < 40);
+
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "photoscoping_test_feather.json").string();
+    std::string error;
+    CHECK(h.save(path, &error));
+    Fixes back;
+    CHECK(back.load(path, &error) && back.find(sid) && back.find(sid)->feather == 10.0f);
+    std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
@@ -306,6 +349,7 @@ int main() {
     test_rematte();
     test_apply_fixes();
     test_blend_patch();
+    test_shape_editing();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);
         return 1;

@@ -41,6 +41,13 @@ struct Track {
     // Removes the key at `frame`. False if there is none there, or it is
     // the last key, which removing would leave the track with nothing.
     bool remove_key(std::int64_t frame);
+    // A point added between point `after` and the next, `t` of the way
+    // along, in every key -- so the track still tweens point for point, and
+    // the new point rides along the edge it was put on.
+    void insert_point(std::size_t after, float t);
+    // Point `index` taken out of every key. False if that would leave fewer
+    // than `minimum`.
+    bool remove_point(std::size_t index, std::size_t minimum);
     std::size_t point_count() const { return keys.empty() ? 0 : keys.front().points.size(); }
     std::int64_t first_frame() const { return keys.front().frame; }
     std::int64_t last_frame() const { return keys.back().frame; }
@@ -54,7 +61,14 @@ struct Track {
 // A garbage matte: a closed polygon the subject is always inside. Outside
 // it, the matte is forced to background. It holds before its first key and
 // after its last: where the subject can be does not stop being true.
-struct Garbage : Track {};
+//
+// `feather` softens its edge outward, in image pixels: the matte fades over
+// that distance outside the shape rather than stopping at its edge, so what
+// is just outside -- a stray hair the shape did not quite take in -- is
+// eased out rather than cut. The shape's own edge stays whole.
+struct Garbage : Track {
+    float feather = 0.0f;
+};
 
 // Which way a stroke paints the matte.
 enum class PaintMode { kOut, kIn };

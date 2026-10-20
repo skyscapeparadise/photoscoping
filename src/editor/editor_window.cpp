@@ -41,6 +41,9 @@ void EditorWindow::build(ui::FontCache& fonts, const gpu::IconAtlas& large_icons
     viewer_->build(fonts);
     garbage_ = viewer_->add<GarbageTool>();
     garbage_->attach(viewer_, fixes);
+    garbage_->on_heading_changed = [this] {
+        if (garbage_->active()) inspector_->set_heading(garbage_->heading());
+    };
     paint_ = viewer_->add<PaintTool>();
     paint_->attach(viewer_, fixes);
     paint_->on_brush_changed = [this] { inspector_->set_heading(paint_->heading()); };
@@ -58,6 +61,7 @@ void EditorWindow::build(ui::FontCache& fonts, const gpu::IconAtlas& large_icons
         paint_->set_active(tool == Tool::kPaint);
         rematte_->set_active(tool == Tool::kRematte);
         if (tool == Tool::kPaint) inspector_->set_heading(paint_->heading());
+        if (tool == Tool::kGarbage) inspector_->set_heading(garbage_->heading());
         if (tool == Tool::kRematte) inspector_->set_heading(rematte_->heading());
         if (on_tool_changed) on_tool_changed(tool);
     };

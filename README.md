@@ -56,7 +56,10 @@ The garbage tool draws garbage mattes -- shapes the subject is always inside;
 outside them the matte is forced to background. Click to place points, and
 click the first point, double-click or press Return to close the shape. Drag
 a point to move it, or an edge to move the whole shape; either keys the
-current frame. Backspace removes the selected shape's key on this frame (or
+current frame. Option-click an edge to add a point there, or a point to take
+it out -- on every key, so the shape still tweens. [ and ] feather the selected
+shape: the matte fades out over that many pixels outside it instead of
+stopping at its edge. Backspace removes the selected shape's key on this frame (or
 the shape, if it has no other), Shift-Backspace the whole shape, and Escape
 abandons one being drawn. Their keys are marked along the ruler.
 

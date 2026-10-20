@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 #include "editor/viewer.hpp"
@@ -22,6 +23,9 @@ namespace ps::editor {
 //                     whole subject, so its inside is most of the frame, and
 //                     a click there is more often the start of another shape
 //                     than a wish to move this one
+//   Option-click      on an edge, adds a point there; on a point, takes it
+//                     out -- on every key of the shape, so it still tweens
+//   [ and ]           the selected shape's feather, softer or harder
 //   Backspace         drawing, the last point; otherwise the selected
 //                     shape's key on this frame -- or the shape, if that
 //                     was its only key
@@ -48,6 +52,10 @@ public:
     std::function<void()> on_live_change;
     // When a change is complete: for saving.
     std::function<void()> on_changed;
+    // The selection, or the selected shape's feather, changed.
+    std::function<void()> on_heading_changed;
+    // For the card: the tool, and the selected shape's feather.
+    std::string heading() const;
 
 protected:
     void paint_self(gpu::DrawList& draw, const ui::PaintContext& ctx) override;
@@ -62,8 +70,10 @@ private:
     // The point of a shape within reach of (x, y): shape id and index, or
     // false.
     bool hit_point(float x, float y, int* id, int* index) const;
-    // The shape whose outline passes within reach of (x, y), or 0.
-    int hit_edge(float x, float y) const;
+    // The shape whose outline passes within reach of (x, y), or 0; with the
+    // edge (from point `*edge` to the next) and how far along it.
+    int hit_edge(float x, float y, int* edge = nullptr, float* along = nullptr) const;
+    void select(int id);
     void begin_edit();
 
     Viewer* viewer_ = nullptr;

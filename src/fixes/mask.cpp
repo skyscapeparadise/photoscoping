@@ -10,13 +10,52 @@ std::vector<std::uint8_t> garbage_mask(const Fixes& fixes, std::int64_t frame, i
     if (fixes.garbage.empty() || width <= 0 || height <= 0) return {};
 
     std::vector<std::vector<Point>> shapes;
+    std::vector<float> feathers;
     for (const Garbage& g : fixes.garbage) {
         std::vector<Point> pts = g.at(frame);
         for (Point& p : pts) {
             p.x *= scale;
             p.y *= scale;
         }
-        if (pts.size() >= 3) shapes.push_back(std::move(pts));
+        if (pts.size() < 3) continue;
+        shapes.push_back(std::move(pts));
+        feathers.push_back(g.feather * scale);
+    }
+
+    // The feathers first: outside each feathered shape, fading with the
+    // distance to its nearest edge -- every edge marks the pixels near it,
+    // so the work goes with the length of the outline, not the frame.
+    std::vector<float> soft;
+    for (std::size_t s = 0; s < shapes.size(); ++s) {
+        const float f = feathers[s];
+        if (f < 0.5f) continue;
+        if (soft.empty()) soft.assign(static_cast<std::size_t>(width) * height, 0.0f);
+        const std::vector<Point>& pts = shapes[s];
+        for (std::size_t i = 0, n = pts.size(); i < n; ++i) {
+            const Point& a = pts[i];
+            const Point& b = pts[(i + 1) % n];
+            const int x0 = std::max(0, static_cast<int>(std::floor(std::min(a.x, b.x) - f)));
+            const int x1 = std::min(width - 1, static_cast<int>(std::ceil(std::max(a.x, b.x) + f)));
+            const int y0 = std::max(0, static_cast<int>(std::floor(std::min(a.y, b.y) - f)));
+            const int y1 = std::min(height - 1, static_cast<int>(std::ceil(std::max(a.y, b.y) + f)));
+            const float dx = b.x - a.x, dy = b.y - a.y;
+            const float len2 = dx * dx + dy * dy;
+            for (int y = y0; y <= y1; ++y) {
+                const float py = static_cast<float>(y) + 0.5f;
+                for (int x = x0; x <= x1; ++x) {
+                    const float px = static_cast<float>(x) + 0.5f;
+                    float t = len2 > 0.0f ? ((px - a.x) * dx + (py - a.y) * dy) / len2 : 0.0f;
+                    t = std::clamp(t, 0.0f, 1.0f);
+                    const float ex = a.x + t * dx - px, ey = a.y + t * dy - py;
+                    const float d = std::sqrt(ex * ex + ey * ey);
+                    if (d >= f) continue;
+                    float c = 1.0f - d / f;
+                    c = c * c * (3.0f - 2.0f * c);
+                    float& here = soft[static_cast<std::size_t>(y) * width + x];
+                    here = std::max(here, c);
+                }
+            }
+        }
     }
 
     // Four scanlines a row, and each span's ends counted to the fraction of a
@@ -58,8 +97,11 @@ std::vector<std::uint8_t> garbage_mask(const Fixes& fixes, std::int64_t frame, i
         }
         // Shapes that overlap add past one; the union is held to it.
         std::uint8_t* row = &out[static_cast<std::size_t>(y) * width];
-        for (int x = 0; x < width; ++x)
-            row[x] = static_cast<std::uint8_t>(std::lround(std::min(cover[x], 1.0f) * 255.0f));
+        const float* fade = soft.empty() ? nullptr : &soft[static_cast<std::size_t>(y) * width];
+        for (int x = 0; x < width; ++x) {
+            const float c = fade ? std::max(std::min(cover[x], 1.0f), fade[x]) : std::min(cover[x], 1.0f);
+            row[x] = static_cast<std::uint8_t>(std::lround(c * 255.0f));
+        }
     }
     return out;
 }

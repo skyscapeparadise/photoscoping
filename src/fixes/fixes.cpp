@@ -80,6 +80,23 @@ bool Track::remove_key(std::int64_t frame) {
     return true;
 }
 
+void Track::insert_point(std::size_t after, float t) {
+    for (ShapeKey& k : keys) {
+        const std::size_t n = k.points.size();
+        if (after >= n) continue;
+        const Point& a = k.points[after];
+        const Point& b = k.points[(after + 1) % n];
+        const Point p{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t};
+        k.points.insert(k.points.begin() + static_cast<std::ptrdiff_t>(after + 1), p);
+    }
+}
+
+bool Track::remove_point(std::size_t index, std::size_t minimum) {
+    if (point_count() <= minimum || index >= point_count()) return false;
+    for (ShapeKey& k : keys) k.points.erase(k.points.begin() + static_cast<std::ptrdiff_t>(index));
+    return true;
+}
+
 Garbage* Fixes::find(int id) {
     for (Garbage& g : garbage)
         if (g.id == id) return &g;
@@ -208,6 +225,7 @@ bool Fixes::load(const std::string& path, std::string* error) {
     for (const auto& g : doc.value("garbage", nlohmann::json::array())) {
         Garbage shape;
         shape.id = g.value("id", 0);
+        shape.feather = std::max(0.0f, g.value("feather", 0.0f));
         if (read_keys(g, 3, &shape.keys)) garbage.push_back(std::move(shape));
     }
     for (const auto& st : doc.value("strokes", nlohmann::json::array())) {
@@ -236,7 +254,11 @@ bool Fixes::save(const std::string& path, std::string* error) const {
     doc["version"] = kFormatVersion;
     doc["next_id"] = next_id;
     nlohmann::json shapes = nlohmann::json::array();
-    for (const Garbage& g : garbage) shapes.push_back({{"id", g.id}, {"keys", write_keys(g.keys)}});
+    for (const Garbage& g : garbage) {
+        nlohmann::json shape = {{"id", g.id}, {"keys", write_keys(g.keys)}};
+        if (g.feather > 0.0f) shape["feather"] = g.feather;
+        shapes.push_back(std::move(shape));
+    }
     doc["garbage"] = shapes;
     nlohmann::json strokes_json = nlohmann::json::array();
     for (const Stroke& st : strokes)
