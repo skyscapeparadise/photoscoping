@@ -8,6 +8,7 @@ BiRefNet's decoder uses deformable convolutions, which not every runtime
 has -- so this exports it and checks it against PyTorch on a few real frames:
 how fast, and how close.
 
+  fp16     the Core ML-ready model converted to half precision
   check    the deformable convolution rebuilt from standard operations,
            against torchvision's, through the whole model
   export   BiRefNet HR-matting at 2048², fp32, to ONNX, with that swap made
@@ -47,6 +48,9 @@ SIZE = 2048
 MODEL = OUT / f"birefnet_hr_matting_{SIZE}.onnx"
 # The same model with the backbone rewritten for Core ML (make_coreml_friendly).
 MODEL_COREML = OUT / f"birefnet_hr_matting_{SIZE}_coreml.onnx"
+# That model in half precision, as PyTorch runs it today, with its input and
+# output left as fp32 so the callers do not change.
+MODEL_COREML_FP16 = OUT / f"birefnet_hr_matting_{SIZE}_coreml_fp16.onnx"
 
 
 def portable_deform_conv2d(x, offset, weight, bias, padding, mask, stride, kernel_size):
@@ -239,6 +243,44 @@ def export(args) -> int:
     return 0
 
 
+def fp16(args) -> int:
+    import onnx
+    from onnxconverter_common import float16
+    t0 = time.perf_counter()
+    # Folded first. The window and padding arithmetic is on fixed sizes, so
+    # it reduces to constants; left in, the converter makes it half too, and
+    # Core ML refuses the one-element half tensors that come out of it.
+    import onnxruntime as ort
+    folded = OUT / "folded_fp32.onnx"
+    options = ort.SessionOptions()
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+    options.optimized_model_filepath = str(folded)
+    ort.InferenceSession(str(MODEL_COREML), options, providers=["CPUExecutionProvider"])
+    print(f"folded: {len(onnx.load(str(MODEL_COREML), load_external_data=False).graph.node)} -> "
+          f"{len(onnx.load(str(folded), load_external_data=False).graph.node)} nodes")
+    model = float16.convert_float_to_float16(onnx.load(str(folded)), keep_io_types=True)
+    folded.unlink()
+    # The converter declares the graph's tensors half but leaves the graph's
+    # own casts to float as they were, so those casts no longer produce the
+    # type declared for their output and the model will not load. Each is
+    # made to produce what was declared. The casts the converter inserts
+    # itself, around operations it keeps in fp32, declare float and stay.
+    declared = {v.name: v.type.tensor_type.elem_type for v in model.graph.value_info}
+    fixed = 0
+    for node in model.graph.node:
+        if node.op_type != "Cast" or declared.get(node.output[0]) != onnx.TensorProto.FLOAT16:
+            continue
+        for attr in node.attribute:
+            if attr.name == "to" and attr.i == onnx.TensorProto.FLOAT:
+                attr.i = onnx.TensorProto.FLOAT16
+                fixed += 1
+    print(f"retyped {fixed} casts to half")
+    onnx.save(model, str(MODEL_COREML_FP16))
+    print(f"wrote {MODEL_COREML_FP16} ({MODEL_COREML_FP16.stat().st_size / 1e6:.0f} MB) "
+          f"in {time.perf_counter() - t0:.0f} s")
+    return 0
+
+
 def frames(args) -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     for index in args.at:
@@ -360,6 +402,7 @@ def main() -> int:
                    help="export deformable convolution as plain ops")
     p.add_argument("--coreml", action="store_true",
                    help="rewrite the backbone so Core ML can take all of it")
+    sub.add_parser("fp16")
     p = sub.add_parser("check")
     p.add_argument("--size", type=int, default=512)
     p.add_argument("--coreml", action="store_true", help="with the backbone rewritten too")
@@ -371,7 +414,7 @@ def main() -> int:
     p = sub.add_parser("bench")
     p.add_argument("--only", help="only the ONNX Runtime providers whose name contains this")
     args = parser.parse_args()
-    return {"export": export, "check": check, "frames": frames, "bench": bench,
+    return {"export": export, "check": check, "fp16": fp16, "frames": frames, "bench": bench,
             "compare": compare}[args.command](args)
 
 
