@@ -31,6 +31,9 @@ struct InputTransform {
 
 // What a file's own tags say, for a clip with no LUT in front of it.
 InputTransform transform_from_tags(const media::SignalInfo& signal);
+// The transform for a clip seen through `lut`, or through its tags when that
+// is null.
+InputTransform transform_for(const media::SignalInfo& signal, const color::CubeLut* lut);
 
 // Uploads a decoded frame's planes and converts them into the working image:
 // linear light, Rec.2020, 1.0 = reference white, at the source's resolution.

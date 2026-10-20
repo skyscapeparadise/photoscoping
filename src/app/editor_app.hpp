@@ -3,12 +3,14 @@
 #include <SDL3/SDL.h>
 
 #include <cstdint>
-#include <functional>
+#include <optional>
 #include <string>
 
+#include "app/clip_frames.hpp"
 #include "app/lockstep_stream.hpp"
 #include "app/matte_frames.hpp"
 #include "app/matte_job.hpp"
+#include "color/cube_lut.hpp"
 #include "editor/editor_window.hpp"
 #include "editor/inspector.hpp"
 #include "gpu/display_pass.hpp"
@@ -17,7 +19,6 @@
 #include "gpu/icon_atlas.hpp"
 #include "gpu/ingest_pass.hpp"
 #include "gpu/nebula_pass.hpp"
-#include "media/video_decoder.hpp"
 #include "ui/font.hpp"
 #include "ui/node.hpp"
 
@@ -28,23 +29,22 @@ namespace ps::app {
 //
 // Every frame composites in one order into the context's linear target -- the
 // footage into the viewer's area, the nebula into the inspector's, then the
-// interface over both -- and is encoded once for the swapchain.
+// interface over both -- and is encoded once for the swapchain. Footage and
+// mattes are decoded on worker threads (see FrameSource), so nothing the
+// main thread waits on is slower than an upload.
 class EditorApp {
 public:
-    struct Clip {
-        // Null for a window with nothing open.
-        media::VideoDecoder* decoder = nullptr;
-        std::string name;
-        // How the decoder's current frame becomes working space. Asked again
-        // for every frame, since the signal is described per frame.
-        std::function<gpu::InputTransform()> transform;
-        editor::ClipInfo info;
-        // Where the clip and its LUT are, for the matting tool, which opens
-        // them itself. The LUT may be empty.
-        std::string path;
+    struct Options {
+        // Empty for a window with nothing open yet.
+        std::string clip;
+        std::int64_t frame = 0;
+        bool software_decode = false;
+        // Already loaded by the caller, which checked it; the path is for the
+        // matting tool, which opens it itself.
+        std::optional<color::CubeLut> lut;
         std::string lut_path;
-        // Where tools/matte_clip.py writes this clip's renders and reads
-        // them back from.
+        // Where tools/matte_clip.py writes each clip's renders and reads them
+        // back from.
         std::string render_dir;
     };
 
@@ -54,8 +54,14 @@ public:
     EditorApp& operator=(const EditorApp&) = delete;
 
     // `gpu` and `ingest` are the caller's and must outlive this.
-    bool create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Clip clip);
+    bool create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options options);
     void destroy();
+
+    // Opens a clip in place of the current one, at `frame`. A matte run for
+    // the old one is stopped; its finished frames stay for a resume.
+    bool open_clip(const std::string& path, std::int64_t frame = 0);
+    // Loads a LUT and puts the clip through it.
+    bool open_lut(const std::string& path);
 
     // Switches the viewer by the view's name. False for a name that is not a
     // view, or a view with nothing to show.
@@ -64,17 +70,22 @@ public:
     // Runs until the window closes.
     void run();
 
-    // Renders one settled frame -- animations finished, the first frame of
-    // the clip decoded -- at the window's current size and writes it as a
-    // PNG. Works with a hidden window.
+    // Renders one settled frame -- animations finished, the frame asked for
+    // decoded -- at the window's current size and writes it as a PNG. Works
+    // with a hidden window.
     bool screenshot(const char* path);
 
 private:
     void handle(const SDL_Event& event);
+    // A file dropped on the window or chosen in File > Open: a LUT by its
+    // extension, a clip otherwise.
+    void open_path(const std::string& path);
+    void show_open_dialog();
     void set_playing(bool playing);
     void seek(std::int64_t frame);
-    // Moves the decoder toward the frame asked for, if it is not there.
-    void decode_pending();
+    // Asks every source the view needs for the frame wanted, and shows it
+    // once they all have it. Never waits.
+    void advance(SDL_GPUCommandBuffer* cmd);
     // Lays out, paints and presents one frame. False when the GPU gave up.
     bool render();
     // Everything up to the interface: footage and backdrop into the linear
@@ -97,10 +108,6 @@ private:
     // its own loop instead (see app/tracking_ticker.hpp).
     static void tracking_tick(void* self);
 
-    gpu::GpuContext* gpu_ = nullptr;
-    gpu::IngestPass* ingest_ = nullptr;
-    Clip clip_;
-
     // Where the matte on screen comes from. The finished videos play
     // smoothly and carry the subject; the per-frame PNGs are there while a
     // run is going or after one stopped short, and are whichever is newer.
@@ -115,6 +122,12 @@ private:
     void toggle_job();
     void poll_job();
 
+    gpu::GpuContext* gpu_ = nullptr;
+    gpu::IngestPass* ingest_ = nullptr;
+    Options options_;
+    std::string clip_name_;
+
+    ClipFrames clip_;
     LockstepStream matte_;
     LockstepStream subject_;
     MatteFrames frames_;
@@ -142,14 +155,19 @@ private:
     bool running_ = false;
     bool rendering_ = false;
     bool animating_ = false;
-    bool fresh_frame_ = false;
     bool playing_ = false;
+    // The frame wanted, and the frame on screen. They differ while the
+    // workers catch up.
     std::int64_t target_ = 0;
+    std::int64_t shown_ = -1;
     Uint64 next_due_ = 0;
     Uint64 last_tick_ = 0;
     // Seconds the nebula has churned. Advanced only while it is churning, so
     // it pauses where it was rather than leaping on when it comes back.
     float nebula_time_ = 0.0f;
+    // The SDL event a path chosen in the open dialog arrives as: the dialog
+    // answers on a thread of its own.
+    Uint32 open_event_ = 0;
 };
 
 }  // namespace ps::app

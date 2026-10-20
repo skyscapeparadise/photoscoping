@@ -111,24 +111,6 @@ std::optional<Options> parse_args(int argc, char** argv) {
     return o;
 }
 
-ps::gpu::InputTransform transform_for(const ps::media::SignalInfo& s,
-                                      const std::optional<ps::color::CubeLut>& lut) {
-    ps::gpu::InputTransform t = ps::gpu::transform_from_tags(s);
-    if (lut) {
-        t.use_lut = true;
-        if (lut->output) {
-            t.gamut = lut->output->gamut;
-            t.transfer = lut->output->transfer;
-        } else {
-            // A LUT that does not say what it outputs: the common case is
-            // Rec.709 video, and it is stated rather than silently assumed.
-            t.gamut = ps::color::Gamut::kRec709;
-            t.transfer = ps::color::Transfer::kBt1886;
-        }
-    }
-    return t;
-}
-
 void describe(const ps::media::VideoDecoder& d, const ps::gpu::InputTransform& t,
               const std::optional<ps::color::CubeLut>& lut, std::FILE* out) {
     const auto& s = d.signal();
@@ -206,38 +188,6 @@ bool write_pfm(const std::string& path, const std::vector<float>& rgba, Uint32 w
     return std::fclose(f) == 0;
 }
 
-// The file's name without its directory or extension, which is what the
-// inspector and the title call the clip.
-std::string clip_name(const std::string& path) {
-    const auto slash = path.find_last_of('/');
-    std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
-    const auto dot = name.find_last_of('.');
-    if (dot != std::string::npos && dot > 0) name = name.substr(0, dot);
-    return name;
-}
-
-ps::editor::ClipInfo clip_info(const std::string& name, const ps::media::VideoDecoder& d,
-                               const std::string& lut_path) {
-    ps::editor::ClipInfo info;
-    info.name = name;
-    char text[64];
-    std::snprintf(text, sizeof text, "%d \xC3\x97 %d", d.width(), d.height());
-    info.rows.emplace_back("size", text);
-    std::snprintf(text, sizeof text, "%.3f", d.frame_rate());
-    // 24.000 reads as a measurement; 24 reads as a frame rate.
-    std::string rate = text;
-    rate.erase(rate.find_last_not_of('0') + 1);
-    if (rate.back() == '.') rate.pop_back();
-    info.rows.emplace_back("rate", rate + " fps");
-    info.rows.emplace_back("length", std::to_string(d.frame_count()) + " frames");
-    info.rows.emplace_back("codec", d.codec_name());
-    info.rows.emplace_back("decode", d.hardware_decoding() ? "videotoolbox" : "software");
-    info.rows.emplace_back("input", lut_path.empty() ? "file tags" : clip_name(lut_path));
-    // Filled in by the app, which knows what has been matted.
-    info.rows.emplace_back("matte", "none");
-    return info;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -269,8 +219,11 @@ int main(int argc, char** argv) {
         }
     }
 
+    // The headless modes decode here; the window opens its clip itself, on
+    // a worker thread, the same way it opens one dropped on it later.
+    const bool headless = options->probe || options->bench || options->pipe;
     ps::media::VideoDecoder decoder;
-    if (!options->clip.empty()) {
+    if (headless) {
         if (!decoder.open(options->clip, !options->software)) return 1;
         if (!decoder.seek_frame(options->frame)) {
             std::fprintf(stderr, "cannot decode frame %lld\n",
@@ -304,10 +257,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const bool have_clip = !options->clip.empty();
     ps::gpu::InputTransform transform;
-    if (have_clip) {
-        transform = transform_for(decoder.signal(), lut);
+    if (headless) {
+        transform = ps::gpu::transform_for(decoder.signal(), lut ? &*lut : nullptr);
         describe(decoder, transform, lut, options->pipe ? stderr : stdout);
     }
 
@@ -387,20 +339,17 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    ps::app::EditorApp::Clip clip;
-    if (have_clip) {
-        clip.decoder = &decoder;
-        clip.name = clip_name(options->clip);
-        clip.transform = [&decoder, &lut] { return transform_for(decoder.signal(), lut); };
-        clip.path = options->clip;
-        clip.lut_path = options->lut;
-        clip.render_dir = options->mattes;
-        clip.info = clip_info(clip.name, decoder, options->lut);
-    }
+    ps::app::EditorApp::Options app_options;
+    app_options.clip = options->clip;
+    app_options.frame = options->frame;
+    app_options.software_decode = options->software;
+    app_options.lut = std::move(lut);
+    app_options.lut_path = options->lut;
+    app_options.render_dir = options->mattes;
     int status = 0;
     {
         ps::app::EditorApp app;
-        if (!app.create(gpu, ingest, std::move(clip))) {
+        if (!app.create(gpu, ingest, std::move(app_options))) {
             status = 1;
         } else if (!options->view.empty() && !app.set_view(options->view)) {
             std::fprintf(stderr, "no %s view for this clip\n", options->view.c_str());

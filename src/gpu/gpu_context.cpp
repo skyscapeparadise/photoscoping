@@ -44,10 +44,17 @@ bool GpuContext::create(const char* title, int width, int height, ColorMode pref
     }
     SDL_SetWindowPosition(window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 
-    // debug_mode=true costs validation overhead but catches malformed pipeline
-    // and binding state at the call that caused it rather than as a corrupted
-    // frame several passes later. Worth it until the renderer is stable.
-    device_ = SDL_CreateGPUDevice(kShaderFormats, /*debug_mode=*/true, /*name=*/nullptr);
+    // Validation catches malformed pipeline and binding state at the call that
+    // caused it rather than as a corrupted frame several passes later, at a
+    // cost in speed -- so in debug builds, and not in release ones. It also
+    // sets MTL_DEBUG_LAYER for the process, which anything it starts inherits
+    // (see MatteJob).
+#ifdef NDEBUG
+    constexpr bool kDebugDevice = false;
+#else
+    constexpr bool kDebugDevice = true;
+#endif
+    device_ = SDL_CreateGPUDevice(kShaderFormats, kDebugDevice, /*name=*/nullptr);
     if (!device_) {
         SDL_Log("SDL_CreateGPUDevice failed: %s", SDL_GetError());
         destroy();

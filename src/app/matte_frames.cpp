@@ -41,9 +41,25 @@ void MatteFrames::open(SDL_GPUDevice* device, const std::string& dir, std::int64
     dir_ = dir;
     done_.assign(static_cast<std::size_t>(std::max<std::int64_t>(0, frame_count)), false);
     rescan();
+    // On the worker: read the PNG and bring it to RGBA bytes, coverage in
+    // red, so the main thread only copies it. Whether the file is there is
+    // asked of the disk, not of done_, which the main thread rescans.
+    start([this](std::int64_t frame) {
+        SDL_Surface* file = IMG_Load(frame_path(dir_, frame).c_str());
+        if (!file) return false;
+        SDL_Surface* rgba = SDL_ConvertSurface(file, SDL_PIXELFORMAT_ABGR8888);
+        SDL_DestroySurface(file);
+        if (!rgba) return false;
+        if (loaded_) SDL_DestroySurface(loaded_);
+        loaded_ = rgba;
+        return true;
+    });
 }
 
 void MatteFrames::destroy() {
+    stop();
+    if (loaded_) SDL_DestroySurface(loaded_);
+    loaded_ = nullptr;
     if (device_) {
         if (texture_) SDL_ReleaseGPUTexture(device_, texture_);
         if (transfer_) SDL_ReleaseGPUTransferBuffer(device_, transfer_);
@@ -51,7 +67,6 @@ void MatteFrames::destroy() {
     texture_ = nullptr;
     transfer_ = nullptr;
     width_ = height_ = 0;
-    loaded_ = -1;
     done_count_ = 0;
 }
 
@@ -76,34 +91,14 @@ bool MatteFrames::rescan() {
     return changed;
 }
 
-bool MatteFrames::has(std::int64_t frame) const {
+bool MatteFrames::matted(std::int64_t frame) const {
     return frame >= 0 && frame < static_cast<std::int64_t>(done_.size()) &&
            done_[static_cast<std::size_t>(frame)];
 }
 
-SDL_GPUTexture* MatteFrames::texture(std::int64_t frame) {
-    if (!has(frame)) return nullptr;
-    if (frame == loaded_) return texture_;
-
-    SDL_Surface* loaded = IMG_Load(frame_path(dir_, frame).c_str());
-    if (!loaded) {
-        SDL_Log("cannot read the matte for frame %lld: %s", static_cast<long long>(frame),
-                SDL_GetError());
-        return nullptr;
-    }
-    // Grey, of whatever depth the loader hands back, to RGBA bytes: the
-    // coverage lands in red, where the viewer reads it.
-    SDL_Surface* rgba = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_ABGR8888);
-    SDL_DestroySurface(loaded);
-    if (!rgba) return nullptr;
-    const bool ok = upload(rgba);
-    SDL_DestroySurface(rgba);
-    if (!ok) return nullptr;
-    loaded_ = frame;
-    return texture_;
-}
-
-bool MatteFrames::upload(SDL_Surface* rgba) {
+bool MatteFrames::upload(SDL_GPUCommandBuffer* cmd) {
+    SDL_Surface* rgba = loaded_;
+    if (!rgba) return false;
     if (!texture_ || rgba->w != width_ || rgba->h != height_) {
         if (texture_) SDL_ReleaseGPUTexture(device_, texture_);
         if (transfer_) SDL_ReleaseGPUTransferBuffer(device_, transfer_);
@@ -136,7 +131,8 @@ bool MatteFrames::upload(SDL_Surface* rgba) {
                     row);
     SDL_UnmapGPUTransferBuffer(device_, transfer_);
 
-    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    // Recorded into the frame's own command buffer, ahead of the pass that
+    // samples it.
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
     SDL_GPUTextureTransferInfo src = {};
     src.transfer_buffer = transfer_;
@@ -149,9 +145,6 @@ bool MatteFrames::upload(SDL_Surface* rgba) {
     dst.d = 1;
     SDL_UploadToGPUTexture(copy, &src, &dst, /*cycle=*/true);
     SDL_EndGPUCopyPass(copy);
-    // Submitted ahead of the frame that samples it, which the GPU orders
-    // after this.
-    SDL_SubmitGPUCommandBuffer(cmd);
     return true;
 }
 

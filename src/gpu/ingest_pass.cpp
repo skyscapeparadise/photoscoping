@@ -22,6 +22,23 @@ InputTransform transform_from_tags(const media::SignalInfo& s) {
     return t;
 }
 
+InputTransform transform_for(const media::SignalInfo& s, const color::CubeLut* lut) {
+    InputTransform t = transform_from_tags(s);
+    if (lut) {
+        t.use_lut = true;
+        if (lut->output) {
+            t.gamut = lut->output->gamut;
+            t.transfer = lut->output->transfer;
+        } else {
+            // A LUT that does not say what it outputs: the common case is
+            // Rec.709 video, and it is stated rather than silently assumed.
+            t.gamut = color::Gamut::kRec709;
+            t.transfer = color::Transfer::kBt1886;
+        }
+    }
+    return t;
+}
+
 namespace {
 
 // Linear light needs float, and half float is enough: 11 bits of mantissa

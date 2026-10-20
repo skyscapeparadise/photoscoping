@@ -91,6 +91,7 @@ target_include_directories(photoscoping_color PUBLIC src)
 # Decoding: FFmpeg, no GPU.
 add_library(photoscoping_media STATIC
     src/media/video_decoder.cpp
+    src/media/frame_worker.cpp
 )
 target_include_directories(photoscoping_media PUBLIC src)
 target_link_libraries(photoscoping_media PUBLIC
@@ -153,13 +154,14 @@ target_link_libraries(photoscoping_ui PUBLIC
 )
 
 add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep_stream.cpp
-                            src/app/matte_frames.cpp src/app/matte_job.cpp)
+                            src/app/matte_frames.cpp src/app/matte_job.cpp
+                            src/app/clip_frames.cpp)
 target_link_libraries(photoscoping PRIVATE photoscoping_ui)
 
 if(APPLE)
-    target_sources(photoscoping PRIVATE src/app/tracking_ticker_mac.mm)
-    set_source_files_properties(src/app/tracking_ticker_mac.mm PROPERTIES
-        COMPILE_OPTIONS "-fobjc-arc")
+    target_sources(photoscoping PRIVATE src/app/tracking_ticker_mac.mm src/app/file_menu_mac.mm)
+    set_source_files_properties(src/app/tracking_ticker_mac.mm src/app/file_menu_mac.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(photoscoping PRIVATE "-framework Cocoa")
 endif()
 

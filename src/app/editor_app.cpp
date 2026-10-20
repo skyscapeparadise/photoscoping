@@ -1,11 +1,14 @@
 #include "app/editor_app.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <unordered_map>
 
+#include "app/file_menu.hpp"
 #include "app/tracking_ticker.hpp"
 #include "editor/theme.hpp"
 
@@ -87,19 +90,58 @@ SDL_FRect to_device(const gpu::Rect& r, float scale) {
     return {x0, y0, std::max(0.0f, x1 - x0), std::max(0.0f, y1 - y0)};
 }
 
+// A file's name without its directory or extension, which is what the
+// inspector and the title call it.
+std::string stem_of(const std::string& path) {
+    return std::filesystem::path(path).stem().string();
+}
+
+bool is_lut(const std::string& path) {
+    std::string ext = std::filesystem::path(path).extension().string();
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return ext == ".cube";
+}
+
+editor::ClipInfo clip_info(const std::string& name, const media::VideoDecoder& d,
+                           const std::string& lut_path) {
+    editor::ClipInfo info;
+    info.name = name;
+    char text[64];
+    std::snprintf(text, sizeof text, "%d \xC3\x97 %d", d.width(), d.height());
+    info.rows.emplace_back("size", text);
+    std::snprintf(text, sizeof text, "%.3f", d.frame_rate());
+    // 24.000 reads as a measurement; 24 reads as a frame rate.
+    std::string rate = text;
+    rate.erase(rate.find_last_not_of('0') + 1);
+    if (rate.back() == '.') rate.pop_back();
+    info.rows.emplace_back("rate", rate + " fps");
+    info.rows.emplace_back("length", std::to_string(d.frame_count()) + " frames");
+    info.rows.emplace_back("codec", d.codec_name());
+    info.rows.emplace_back("decode", d.hardware_decoding() ? "videotoolbox" : "software");
+    info.rows.emplace_back("input", lut_path.empty() ? "file tags" : stem_of(lut_path));
+    // Filled in from what has been matted.
+    info.rows.emplace_back("matte", "none");
+    return info;
+}
+
+std::string time_left(double seconds) {
+    if (seconds < 60.0) return "under a minute left";
+    const int minutes = static_cast<int>(std::ceil(seconds / 60.0));
+    if (minutes < 60) return std::to_string(minutes) + " min left";
+    return std::to_string(minutes / 60) + " h " + std::to_string(minutes % 60) + " min left";
+}
+
 }  // namespace
 
 EditorApp::~EditorApp() { destroy(); }
 
-bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Clip clip) {
+bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options options) {
     gpu_ = &gpu;
     ingest_ = &ingest;
-    clip_ = std::move(clip);
+    options_ = std::move(options);
 
     SDL_SetWindowMinimumSize(gpu.window(), kMinWindowWidth, kMinWindowHeight);
-    SDL_SetWindowTitle(gpu.window(), clip_.decoder
-                                         ? ("photoscoping \xE2\x80\x94 " + clip_.name).c_str()
-                                         : "photoscoping");
+    SDL_SetWindowTitle(gpu.window(), "photoscoping");
 
     if (!display_.create(gpu) || !nebula_.create(gpu) || !draw_.create(gpu)) return false;
     if (!fonts_.init(gpu.device(), resource_path("fonts/MonaSans-Regular.ttf").c_str(),
@@ -108,24 +150,11 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Clip clip)
     if (!build_atlases()) return false;
 
     root_.build(fonts_, large_icons_, small_icons_);
-    root_.inspector()->set_clip(clip_.info);
-
     root_.inspector()->views()->on_view_changed = [this](editor::View view) { view_ = view; };
     root_.inspector()->on_action = [this] { toggle_job(); };
     job_.locate();
-    if (clip_.decoder) {
-        frames_.open(gpu.device(), render_path("_mattes"), clip_.decoder->frame_count());
-        choose_matte_source();
-    }
-    refresh_matte_ui();
 
     editor::Timeline* timeline = root_.timeline();
-    if (clip_.decoder) {
-        timeline->set_clip(clip_.decoder->frame_rate(), clip_.decoder->frame_count());
-        timeline->set_frame(clip_.decoder->frame_index());
-        target_ = clip_.decoder->frame_index();
-        fresh_frame_ = true;
-    }
     timeline->on_seek = [this](std::int64_t frame) { seek(frame); };
     timeline->on_play = [this](bool play) { set_playing(play); };
     timeline->on_stop = [this] {
@@ -133,11 +162,37 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Clip clip)
         target_ = 0;
     };
     timeline->on_step = [this](int delta) {
-        if (!clip_.decoder) return;
+        if (!clip_.is_open()) return;
         set_playing(false);
-        target_ = std::max<std::int64_t>(0, clip_.decoder->frame_index() + delta);
+        target_ = std::max<std::int64_t>(0, std::max<std::int64_t>(shown_, 0) + delta);
     };
 
+    // A worker that has made a frame wakes the main loop, which may be
+    // asleep on its events, to come and get it.
+    open_event_ = SDL_RegisterEvents(2);
+    const Uint32 frame_event = open_event_ + 1;
+    for (FrameSource* source : {static_cast<FrameSource*>(&clip_),
+                                static_cast<FrameSource*>(&matte_),
+                                static_cast<FrameSource*>(&subject_),
+                                static_cast<FrameSource*>(&frames_)}) {
+        source->set_notify([frame_event] {
+            SDL_Event event = {};
+            event.type = frame_event;
+            SDL_PushEvent(&event);
+        });
+    }
+
+    if (options_.lut) {
+        ingest_->set_lut(*options_.lut);
+        clip_.set_lut(&*options_.lut);
+    }
+    if (!options_.clip.empty() && !open_clip(options_.clip, options_.frame)) return false;
+    refresh_matte_ui();
+
+#if defined(SDL_PLATFORM_APPLE)
+    install_file_menu([](void* self) { static_cast<EditorApp*>(self)->show_open_dialog(); },
+                      this);
+#endif
     SDL_AddEventWatch(&EditorApp::watch_events, this);
     last_tick_ = SDL_GetTicksNS();
     return true;
@@ -150,6 +205,7 @@ void EditorApp::destroy() {
     // the tree goes first.
     root_.clear_children();
     job_.stop();
+    clip_.close();
     frames_.destroy();
     matte_.destroy();
     subject_.destroy();
@@ -172,6 +228,78 @@ bool EditorApp::build_atlases() {
                               static_cast<int>(std::ceil(kSmallIcon * atlas_scale_)));
 }
 
+bool EditorApp::open_clip(const std::string& path, std::int64_t frame) {
+    // A run belongs to the clip it was started for; its finished frames stay
+    // on disk, and resume when that clip is open again.
+    job_.stop();
+    matte_.destroy();
+    subject_.destroy();
+    frames_.destroy();
+    if (!clip_.open(path, !options_.software_decode, ingest_)) {
+        SDL_Log("cannot open %s", path.c_str());
+        refresh_matte_ui();
+        return false;
+    }
+    clip_.set_lut(options_.lut ? &*options_.lut : nullptr);
+    clip_name_ = stem_of(path);
+    SDL_SetWindowTitle(gpu_->window(), ("photoscoping \xE2\x80\x94 " + clip_name_).c_str());
+    root_.inspector()->set_clip(clip_info(clip_name_, clip_.decoder(), options_.lut_path));
+
+    playing_ = false;
+    shown_ = -1;
+    target_ = std::clamp<std::int64_t>(frame, 0, std::max<std::int64_t>(0, clip_.frame_count() - 1));
+    root_.timeline()->set_clip(clip_.frame_rate(), clip_.frame_count());
+
+    frames_.open(gpu_->device(), render_path("_mattes"), clip_.frame_count());
+    choose_matte_source();
+    refresh_matte_ui();
+    SDL_Log("opened %s", path.c_str());
+    return true;
+}
+
+bool EditorApp::open_lut(const std::string& path) {
+    std::string error;
+    std::optional<color::CubeLut> lut = color::load_cube(path, &error);
+    if (!lut) {
+        SDL_Log("cannot load %s: %s", path.c_str(), error.c_str());
+        return false;
+    }
+    if (lut->full_range_in && !*lut->full_range_in) {
+        SDL_Log("%s expects narrow-range input, which is not supported yet", path.c_str());
+        return false;
+    }
+    if (!ingest_->set_lut(*lut)) return false;
+    options_.lut = std::move(lut);
+    options_.lut_path = path;
+    clip_.set_lut(&*options_.lut);
+    root_.inspector()->set_row("input", stem_of(path));
+    SDL_Log("LUT %s", path.c_str());
+    return true;
+}
+
+void EditorApp::open_path(const std::string& path) {
+    if (is_lut(path)) open_lut(path);
+    else open_clip(path);
+}
+
+void EditorApp::show_open_dialog() {
+    static const SDL_DialogFileFilter kFilters[] = {
+        {"Clips and LUTs", "mov;mp4;m4v;mxf;avi;mkv;crm;cube"},
+        {"All files", "*"},
+    };
+    // The answer comes on whatever thread the dialog likes, so it is handed
+    // to the main loop as an event rather than acted on here.
+    SDL_ShowOpenFileDialog(
+        [](void* self, const char* const* files, int) {
+            if (!files || !files[0]) return;  // an error, or cancelled
+            SDL_Event event = {};
+            event.type = static_cast<EditorApp*>(self)->open_event_;
+            event.user.data1 = SDL_strdup(files[0]);
+            SDL_PushEvent(&event);
+        },
+        this, gpu_->window(), kFilters, 2, nullptr, /*allow_many=*/false);
+}
+
 bool EditorApp::set_view(const std::string& name) {
     editor::ViewSwitch* views = root_.inspector()->views();
     for (editor::View view : {editor::View::kFootage, editor::View::kMatte,
@@ -185,7 +313,7 @@ bool EditorApp::set_view(const std::string& name) {
 }
 
 std::string EditorApp::render_path(const char* suffix) const {
-    return (std::filesystem::path(clip_.render_dir) / (clip_.name + suffix)).string();
+    return (std::filesystem::path(options_.render_dir) / (clip_name_ + suffix)).string();
 }
 
 void EditorApp::open_videos() {
@@ -203,6 +331,10 @@ void EditorApp::open_videos() {
 }
 
 void EditorApp::choose_matte_source() {
+    if (!clip_.is_open()) {
+        source_ = MatteSource::kNone;
+        return;
+    }
     std::error_code ec;
     const std::string video = render_path("_matte.mp4");
     const bool have_video = std::filesystem::exists(video, ec);
@@ -219,20 +351,9 @@ void EditorApp::choose_matte_source() {
     }
 }
 
-namespace {
-
-std::string time_left(double seconds) {
-    if (seconds < 60.0) return "under a minute left";
-    const int minutes = static_cast<int>(std::ceil(seconds / 60.0));
-    if (minutes < 60) return std::to_string(minutes) + " min left";
-    return std::to_string(minutes / 60) + " h " + std::to_string(minutes % 60) + " min left";
-}
-
-}  // namespace
-
 void EditorApp::refresh_matte_ui() {
     editor::Inspector* inspector = root_.inspector();
-    const std::int64_t total = clip_.decoder ? clip_.decoder->frame_count() : 0;
+    const std::int64_t total = clip_.frame_count();
     const std::int64_t done = frames_.done_count();
     const bool complete = total > 0 && done >= total;
 
@@ -266,7 +387,7 @@ void EditorApp::refresh_matte_ui() {
     }
     inspector->set_row("matte", row);
 
-    if (!clip_.decoder || !job_.available())
+    if (!clip_.is_open() || !job_.available())
         inspector->set_action("matte clip", false);
     else if (job_.running())
         inspector->set_action("stop matting", true);
@@ -281,12 +402,12 @@ void EditorApp::refresh_matte_ui() {
 void EditorApp::toggle_job() {
     if (job_.running()) {
         job_.stop();
-    } else if (clip_.decoder) {
+    } else if (clip_.is_open()) {
         // The videos are about to be replaced, and the PNGs are what will
         // be current, so stop reading the old ones now.
         matte_.destroy();
         subject_.destroy();
-        if (job_.start(clip_.path, clip_.lut_path, clip_.render_dir, clip_.name)) {
+        if (job_.start(clip_.path(), options_.lut_path, options_.render_dir, clip_name_)) {
             job_started_ns_ = SDL_GetTicksNS();
             done_at_start_ = frames_.done_count();
         }
@@ -301,7 +422,9 @@ void EditorApp::poll_job() {
     const Uint64 now = SDL_GetTicksNS();
     if (now - last_poll_ns_ < 1000000000ull) return;
     last_poll_ns_ = now;
-    frames_.rescan();
+    // A matte that has just landed for the frame on screen is fetched, not
+    // left waiting for the next time the frame changes.
+    if (frames_.rescan() && frames_.matted(shown_) && frames_.shown() != shown_) frames_.refresh();
     bool succeeded = false;
     if (job_.poll_finished(&succeeded)) {
         if (!succeeded)
@@ -313,38 +436,46 @@ void EditorApp::poll_job() {
 }
 
 void EditorApp::set_playing(bool playing) {
-    if (!clip_.decoder) return;
+    if (!clip_.is_open()) return;
     playing_ = playing;
     next_due_ = SDL_GetTicksNS();
 }
 
 void EditorApp::seek(std::int64_t frame) {
-    if (!clip_.decoder) return;
+    if (!clip_.is_open()) return;
     target_ = frame;
     // Scrubbing while playing carries on from wherever the head was put.
-    next_due_ = SDL_GetTicksNS() +
-                static_cast<Uint64>(1e9 / std::max(1.0, clip_.decoder->frame_rate()));
+    next_due_ = SDL_GetTicksNS() + static_cast<Uint64>(1e9 / std::max(1.0, clip_.frame_rate()));
 }
 
 void EditorApp::handle(const SDL_Event& event) {
+    if (event.type == open_event_) {
+        char* path = static_cast<char*>(event.user.data1);
+        if (path) open_path(path);
+        SDL_free(path);
+        return;
+    }
     switch (event.type) {
         case SDL_EVENT_QUIT:
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
             running_ = false;
             break;
+        case SDL_EVENT_DROP_FILE:
+            if (event.drop.data) open_path(event.drop.data);
+            break;
         case SDL_EVENT_KEY_DOWN: {
-            media::VideoDecoder* d = clip_.decoder;
+            const std::int64_t at = std::max<std::int64_t>(shown_, 0);
             switch (event.key.key) {
                 case SDLK_SPACE:
                     if (!event.key.repeat) set_playing(!playing_);
                     break;
                 case SDLK_RIGHT:
-                    if (d) { set_playing(false); target_ = d->frame_index() + 1; }
+                    if (clip_.is_open()) { set_playing(false); target_ = at + 1; }
                     break;
                 case SDLK_LEFT:
-                    if (d) {
+                    if (clip_.is_open()) {
                         set_playing(false);
-                        target_ = std::max<std::int64_t>(0, d->frame_index() - 1);
+                        target_ = std::max<std::int64_t>(0, at - 1);
                     }
                     break;
                 case SDLK_HOME:
@@ -391,28 +522,64 @@ void EditorApp::handle(const SDL_Event& event) {
     }
 }
 
-void EditorApp::decode_pending() {
-    media::VideoDecoder* d = clip_.decoder;
-    if (!d) return;
-    if (playing_ && SDL_GetTicksNS() >= next_due_) {
-        target_ = d->frame_index() + 1;
-        next_due_ += static_cast<Uint64>(1e9 / (d->frame_rate() > 0 ? d->frame_rate() : 24.0));
+void EditorApp::advance(SDL_GPUCommandBuffer* cmd) {
+    if (!clip_.is_open()) return;
+    const double fps = clip_.frame_rate() > 0.0 ? clip_.frame_rate() : 24.0;
+    const auto period = static_cast<Uint64>(1e9 / fps);
+
+    // Playing, the next frame becomes the one wanted when it is due and the
+    // last one made it to the screen. Fallen well behind -- a slow seek, a
+    // stall -- the clock restarts from now rather than racing to catch up.
+    const Uint64 now = SDL_GetTicksNS();
+    if (playing_ && shown_ == target_ && now >= next_due_) {
+        target_ = shown_ + 1;
+        next_due_ = now > next_due_ + period ? now + period : next_due_ + period;
     }
-    if (target_ != d->frame_index()) {
-        const bool ok = target_ == d->frame_index() + 1 ? d->read_next() : d->seek_frame(target_);
-        if (ok) fresh_frame_ = true;
-        else playing_ = false;  // the end of the clip
-        target_ = d->frame_index();
+
+    // Everything the view reads, asked for the same frame.
+    FrameSource* needed[4];
+    int count = 0;
+    needed[count++] = &clip_;
+    if (view_ != editor::View::kFootage) {
+        if (source_ == MatteSource::kVideos) {
+            needed[count++] = &matte_;
+            if (view_ == editor::View::kSubject && subject_.is_open()) needed[count++] = &subject_;
+        } else if (source_ == MatteSource::kFrames && frames_.matted(target_)) {
+            needed[count++] = &frames_;
+        }
     }
-    root_.timeline()->set_frame(d->frame_index());
-    root_.timeline()->set_playing(playing_);
+
+    const std::int64_t next = playing_ ? target_ + 1 : -1;
+    bool all_there = true;
+    for (int i = 0; i < count; ++i) {
+        FrameSource* s = needed[i];
+        s->drop_stale(target_, next);
+        if (s->has(target_)) continue;
+        s->request(target_);
+        // A render with no such frame is not waited for: the view shows the
+        // footage alone there.
+        if (s->failed() != target_) all_there = false;
+    }
+    if (clip_.failed() == target_) {
+        // Past the end of the clip.
+        playing_ = false;
+        target_ = std::max<std::int64_t>(shown_, 0);
+        return;
+    }
+    if (!all_there) return;
+
+    for (int i = 0; i < count; ++i)
+        if (needed[i]->shown() != target_ && needed[i]->ready() == target_) needed[i]->take(cmd);
+    shown_ = target_;
+    // Ahead of time: the next frame decodes while this one is on screen.
+    if (playing_)
+        for (int i = 0; i < count; ++i) needed[i]->request(target_ + 1);
 }
 
 void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, float dt) {
-    if (fresh_frame_ && clip_.decoder) {
-        ingest_->process(cmd, *clip_.decoder, clip_.transform());
-        fresh_frame_ = false;
-    }
+    advance(cmd);
+    root_.timeline()->set_frame(std::max<std::int64_t>(shown_, 0));
+    root_.timeline()->set_playing(playing_);
     gpu_->resize_if_needed(width, height);
 
     int lw = 0, lh = 0;
@@ -435,20 +602,17 @@ void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, 
 void EditorApp::composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale) {
     gpu::DisplayPass::Frame frame;
     gpu::DisplayView view = gpu::DisplayView::kFootage;
-    if (clip_.decoder && ingest_->working()) {
+    if (clip_.is_open() && clip_.shown() >= 0 && ingest_->working()) {
         frame.working = ingest_->working();
         frame.width = ingest_->width();
         frame.height = ingest_->height();
-        // Only what the view reads is decoded, so the footage view plays
-        // as fast as it did before there were renders to keep up with.
-        const std::int64_t at = clip_.decoder->frame_index();
-        const bool wants_matte = view_ != editor::View::kFootage;
-        if (wants_matte && source_ == MatteSource::kFrames) {
-            frame.matte = frames_.texture(at);
-        } else if (wants_matte && source_ == MatteSource::kVideos) {
-            if (matte_.sync(cmd, at)) frame.matte = matte_.working();
-            if (view_ == editor::View::kSubject && subject_.sync(cmd, at))
-                frame.subject = subject_.working();
+        // Only renders of the frame on screen: one still catching up after a
+        // change of view is left out, and the footage shows alone meanwhile.
+        if (source_ == MatteSource::kFrames && frames_.shown() == shown_) {
+            frame.matte = frames_.texture();
+        } else if (source_ == MatteSource::kVideos) {
+            if (matte_.shown() == shown_) frame.matte = matte_.working();
+            if (subject_.shown() == shown_) frame.subject = subject_.working();
         }
         switch (view_) {
             case editor::View::kFootage: view = gpu::DisplayView::kFootage; break;
@@ -516,7 +680,6 @@ void EditorApp::tracking_tick(void* self) {
     auto* app = static_cast<EditorApp*>(self);
     if (!app->running_) return;
     app->poll_job();
-    app->decode_pending();
     app->render();
 }
 
@@ -527,9 +690,10 @@ void EditorApp::run() {
 #endif
     while (running_) {
         SDL_Event event;
-        // Block for input when nothing is moving; while playing, wake for the
-        // next frame; while the nebula churns, wake often enough to move it;
-        // while something animates, keep going.
+        // Block for input when nothing is moving. Playing, wake for the next
+        // frame; churning, often enough to move the nebula; animating, keep
+        // going. A frame finished on a worker wakes the loop with an event of
+        // its own, so waiting on one needs no timeout.
         bool got = false;
         if (playing_) {
             const Uint64 now = SDL_GetTicksNS();
@@ -551,7 +715,6 @@ void EditorApp::run() {
             while (SDL_PollEvent(&event));
         }
         poll_job();
-        decode_pending();
         if (!running_ || !render()) break;
     }
 #if defined(SDL_PLATFORM_APPLE)
@@ -564,6 +727,20 @@ bool EditorApp::screenshot(const char* path) {
     int pw = 0, ph = 0;
     SDL_GetWindowSizeInPixels(gpu_->window(), &pw, &ph);
     if (pw <= 0 || ph <= 0) return false;
+
+    // Everything the view reads, decoded before the first pass: a screenshot
+    // is of the frame asked for, not of whatever the workers had got to.
+    if (clip_.is_open()) {
+        clip_.wait(target_);
+        if (view_ != editor::View::kFootage) {
+            if (source_ == MatteSource::kVideos) {
+                matte_.wait(target_);
+                if (view_ == editor::View::kSubject) subject_.wait(target_);
+            } else if (source_ == MatteSource::kFrames && frames_.matted(target_)) {
+                frames_.wait(target_);
+            }
+        }
+    }
 
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu_->device());
     if (!cmd) return false;

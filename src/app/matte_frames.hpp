@@ -7,18 +7,20 @@
 #include <string>
 #include <vector>
 
+#include "app/frame_source.hpp"
+
 namespace ps::app {
 
 // The mattes tools/matte_clip.py writes one frame at a time, as 16-bit PNGs
 // named by frame index, read while the run that writes them is still going.
 //
 // Slower to show than the finished matte video -- a PNG is decoded on the CPU
-// every time the frame changes -- but there from the moment each frame is
-// done, which the video is not until the whole clip is.
-class MatteFrames {
+// every time the frame changes, on the worker -- but there from the moment
+// each frame is done, which the video is not until the whole clip is.
+class MatteFrames : public FrameSource {
 public:
     MatteFrames() = default;
-    ~MatteFrames();
+    ~MatteFrames() override;
     MatteFrames(const MatteFrames&) = delete;
     MatteFrames& operator=(const MatteFrames&) = delete;
 
@@ -31,16 +33,19 @@ public:
     // Which frames have a matte, one entry per frame of the clip.
     const std::vector<bool>& done() const { return done_; }
     std::int64_t done_count() const { return done_count_; }
-    bool has(std::int64_t frame) const;
+    bool matted(std::int64_t frame) const;
     // When the newest of them was written; the epoch when there are none.
     std::filesystem::file_time_type newest() const { return newest_; }
 
-    // The frame's matte as a texture, coverage in red; null without one.
-    // Decodes only when the frame differs from the last one asked for.
-    SDL_GPUTexture* texture(std::int64_t frame);
+    // The shown frame's matte, coverage in red.
+    SDL_GPUTexture* texture() const { return shown_ >= 0 ? texture_ : nullptr; }
+
+protected:
+    bool upload(SDL_GPUCommandBuffer* cmd) override;
 
 private:
-    bool upload(SDL_Surface* rgba);
+    // Decoded on the worker, uploaded from on the main thread.
+    SDL_Surface* loaded_ = nullptr;
 
     SDL_GPUDevice* device_ = nullptr;
     std::string dir_;
@@ -51,7 +56,6 @@ private:
     SDL_GPUTexture* texture_ = nullptr;
     SDL_GPUTransferBuffer* transfer_ = nullptr;
     int width_ = 0, height_ = 0;
-    std::int64_t loaded_ = -1;
 };
 
 }  // namespace ps::app
