@@ -52,6 +52,10 @@ public:
     // The shown frame's patches, or null; and where they go, in UV.
     SDL_GPUTexture* texture() const { return shown_ >= 0 && has_ ? texture_.texture() : nullptr; }
     void rect_uv(float out[4]) const;
+    // The same on the CPU -- red alpha, green weight, four bytes a pixel --
+    // and the part of the frame it covers.
+    const std::vector<std::uint8_t>& pixels() const { return pixels_; }
+    const fixes::PixelRect& rect() const { return rect_; }
 
 protected:
     bool upload(SDL_GPUCommandBuffer* cmd) override;
@@ -83,6 +87,7 @@ private:
 
     MaskTexture texture_;
     fixes::PixelRect rect_;
+    std::vector<std::uint8_t> pixels_;
     bool has_ = false;
 };
 

@@ -106,8 +106,13 @@ The viewer shows a matte four ways: the footage, the matte, the matted subject
 over a checkerboard, or the footage washed purple wherever the matte drops it.
 The pills under the inspector switch between them, as do the keys 1-4, and a
 lilac line along the top of the ruler marks the frames that have a matte. The
-subject view needs the subject rendered, which `tools/matte_clip.py` (the
-Python stack, still there for experiments) does as `<clip>_comp.mp4`.
+subject view of a clip the app matted works out the subject's colour live, as
+an export does -- the matte with its patches and fixes, the wall's spill taken
+out of the edges -- at half size on a thread of its own, once the frame is
+still; while playing, the footage stands in for it. Where the subject is
+solid it shows the footage at full size. A clip matted by
+`tools/matte_clip.py` (the Python stack, still there for experiments) shows
+the `<clip>_comp.mp4` it renders instead.
 
 The matting stack runs through ONNX Runtime -- on the GPU through Core ML, on
 the Mac -- with two models `tools/export_matting_model.py` writes into

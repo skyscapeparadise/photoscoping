@@ -209,7 +209,8 @@ target_link_libraries(photoscoping_ui PUBLIC
 add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep_stream.cpp
                             src/app/matte_frames.cpp src/app/matte_job.cpp
                             src/app/clip_frames.cpp src/app/mask_texture.cpp
-                            src/app/rematte_patches.cpp src/export/clip_export.cpp)
+                            src/app/rematte_patches.cpp src/app/subject_estimate.cpp
+                            src/export/clip_export.cpp)
 target_link_libraries(photoscoping PRIVATE photoscoping_ui photoscoping_matting photoscoping_fixes)
 
 if(APPLE)

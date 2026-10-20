@@ -50,6 +50,11 @@ layout(set = 3, binding = 0) uniform Display {
     vec4 rematte_rect;
     // 1 when there are patches on this frame.
     float has_rematte;
+    // What `subject` holds (ps::gpu::SubjectMode): 0 the subject already
+    // multiplied by the stack's matte, as the Python stack renders it; 1 its
+    // straight colour, estimated by the app; 2 nothing yet, and the footage
+    // stands in for it.
+    float subject_mode;
 } display;
 
 vec3 to_display(vec3 c) {
@@ -80,11 +85,24 @@ void main() {
             vec2 cell = floor(gl_FragCoord.xy / display.checker_px);
             float light = mod(cell.x + cell.y, 2.0);
             vec3 behind = srgb_eotf(vec3(mix(0.16, 0.24, light)));
-            // Coverage painted in has no subject colour from the stack -- it
-            // called that background -- so it takes the footage's.
-            vec3 painted = to_display(texture(subject, v_uv).rgb) * f.g +
-                           to_display(texture(working, v_uv).rgb) * f.b;
-            rgb = painted * f.r + (1.0 - a) * behind;
+            if (display.subject_mode < 0.5) {
+                // Coverage painted in has no subject colour from the stack --
+                // it called that background -- so it takes the footage's.
+                vec3 painted = to_display(texture(subject, v_uv).rgb) * f.g +
+                               to_display(texture(working, v_uv).rgb) * f.b;
+                rgb = painted * f.r + (1.0 - a) * behind;
+            } else {
+                // Straight colour, over the matte as it is now. The estimate
+                // is half size; where the subject is solid its colour is the
+                // footage's anyway, so the footage is used there at full
+                // size, and the estimate only toward the edge, where the
+                // wall's spill is.
+                vec3 footage = texture(working, v_uv).rgb;
+                vec3 own = display.subject_mode < 1.5
+                               ? mix(texture(subject, v_uv).rgb, footage, smoothstep(0.9, 1.0, a))
+                               : footage;
+                rgb = to_display(own) * a + (1.0 - a) * behind;
+            }
         } else {
             // What the matte keeps, untouched; what it drops, washed over --
             // so an edge reads against the footage it was cut from.

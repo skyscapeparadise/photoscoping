@@ -168,7 +168,12 @@ bool RemattePatches::upload(SDL_GPUCommandBuffer* cmd) {
     }
     has_ = !loaded_.empty() &&
            texture_.upload(cmd, loaded_, loaded_rect_.width(), loaded_rect_.height());
-    if (has_) rect_ = loaded_rect_;
+    if (has_) {
+        rect_ = loaded_rect_;
+        pixels_ = loaded_;
+    } else {
+        pixels_.clear();
+    }
     return true;
 }
 

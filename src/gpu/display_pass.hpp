@@ -16,6 +16,13 @@ enum class DisplayView {
 
 // Draws the working image into the viewer's area of the linear target, where
 // the viewer has placed it: fitted, or zoomed and panned.
+// What a frame's subject texture holds (display.frag's subject_mode).
+enum class SubjectMode {
+    kPremultiplied = 0,  // multiplied by the stack's matte: a rendered comp
+    kStraight = 1,       // the subject's own colour, the app's estimate
+    kFootage = 2,        // none yet; the footage stands in
+};
+
 class DisplayPass {
 public:
     DisplayPass() = default;
@@ -40,6 +47,8 @@ public:
         // part of the image they cover in UV: x0, y0, x1, y1. Null when none.
         SDL_GPUTexture* rematte = nullptr;
         float rematte_rect[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        // What `subject` holds.
+        SubjectMode subject_mode = SubjectMode::kPremultiplied;
     };
 
     // Records a pass that clears `target` to `background` (linear nits,

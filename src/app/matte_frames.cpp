@@ -130,6 +130,16 @@ bool MatteFrames::upload(SDL_GPUCommandBuffer* cmd) {
         std::memcpy(mapped + y * row, static_cast<const std::uint8_t*>(rgba->pixels) + y * rgba->pitch,
                     row);
     SDL_UnmapGPUTransferBuffer(device_, transfer_);
+    if (keep_coverage_) {
+        coverage_.resize(static_cast<std::size_t>(width_) * height_);
+        for (int y = 0; y < height_; ++y) {
+            const auto* src = static_cast<const std::uint8_t*>(rgba->pixels) + y * rgba->pitch;
+            std::uint8_t* dst = &coverage_[static_cast<std::size_t>(y) * width_];
+            for (int x = 0; x < width_; ++x) dst[x] = src[x * 4];
+        }
+    } else {
+        coverage_.clear();
+    }
 
     // Recorded into the frame's own command buffer, ahead of the pass that
     // samples it.

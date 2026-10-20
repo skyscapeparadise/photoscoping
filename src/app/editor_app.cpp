@@ -174,7 +174,10 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options op
     // The pill under the inspector is the matting run's, or the re-matte's
     // with that tool in hand.
     root_.on_tool_changed = [this](editor::Tool) { refresh_matte_ui(); };
-    root_.inspector()->views()->on_view_changed = [this](editor::View view) { view_ = view; };
+    root_.inspector()->views()->on_view_changed = [this](editor::View view) {
+        view_ = view;
+        frames_.set_keep_coverage(estimating_subject());
+    };
     root_.inspector()->on_action = [this] { toggle_job(); };
     job_.locate();
 
@@ -208,6 +211,12 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options op
         });
     }
 
+    subject_est_.create(gpu.device(), [frame_event] {
+        SDL_Event event = {};
+        event.type = frame_event;
+        SDL_PushEvent(&event);
+    });
+
     if (options_.lut) {
         ingest_->set_lut(*options_.lut);
         clip_.set_lut(&*options_.lut);
@@ -231,6 +240,7 @@ void EditorApp::destroy() {
     clip_.close();
     frames_.destroy();
     patches_.destroy();
+    subject_est_.destroy();
     matte_.destroy();
     subject_.destroy();
     mask_.destroy();
@@ -280,6 +290,7 @@ bool EditorApp::open_clip(const std::string& path, std::int64_t frame) {
     frames_.open(gpu_->device(), render_path("_mattes"), clip_.frame_count());
     patches_.open(gpu_->device(), render_path("_rematte"), clip_.decoder().width(),
                   clip_.decoder().height(), clip_.frame_count());
+    ++subject_version_;
     choose_matte_source();
 
     std::string error;
@@ -485,7 +496,8 @@ void EditorApp::refresh_matte_ui() {
     }
     inspector->views()->set_available(
         source_ != MatteSource::kNone,
-        source_ == MatteSource::kVideos && subject_.is_open());
+        (source_ == MatteSource::kVideos && subject_.is_open()) || source_ == MatteSource::kFrames);
+    frames_.set_keep_coverage(estimating_subject());
 
     std::string row = "none";
     if (job_.running() && job_.kind() == MatteJob::Kind::kMatte) {
@@ -598,7 +610,7 @@ void EditorApp::poll_job() {
     // on screen if they are its.
     const bool rematting = job_.kind() == MatteJob::Kind::kRematte;
     const bool exporting = job_.kind() == MatteJob::Kind::kExport;
-    if (rematting || exporting) patches_.rescan();
+    if ((rematting || exporting) && patches_.rescan()) ++subject_version_;
     else if (frames_.rescan() && frames_.matted(shown_) && frames_.shown() != shown_) frames_.refresh();
     bool succeeded = false;
     if (job_.poll_finished(&succeeded)) {
@@ -620,6 +632,7 @@ void EditorApp::fixes_changed(bool save) {
     if (!save || !clip_.is_open()) return;
     // Which patches the boxes want; a moved box wants new ones.
     patches_.set_fixes(fixes_);
+    ++subject_version_;
     refresh_matte_ui();
     // A file that would not read is never written over: whatever is in it
     // may be the only copy of someone's work.
@@ -830,7 +843,45 @@ void EditorApp::advance(SDL_GPUCommandBuffer* cmd) {
         for (int i = 0; i < count; ++i) needed[i]->request(target_ + 1);
 }
 
+bool EditorApp::estimating_subject() const {
+    return view_ == editor::View::kSubject && source_ == MatteSource::kFrames;
+}
+
+void EditorApp::request_subject() {
+    if (!estimating_subject() || playing_ || shown_ < 0) return;
+    if (clip_.shown() != shown_ || frames_.shown() != shown_) return;
+    if (patches_.wants(shown_) && patches_.shown() != shown_) return;
+    if (subject_est_.asked(shown_, subject_version_)) return;
+    // Uploaded before the view wanted it kept: fetched again, keeping it.
+    if (frames_.coverage().empty()) {
+        frames_.set_keep_coverage(true);
+        frames_.refresh();
+        return;
+    }
+    if (frames_.width() != static_cast<int>(ingest_->width()) ||
+        frames_.height() != static_cast<int>(ingest_->height()))
+        return;
+
+    // The working image is read back here, before this frame's work is
+    // recorded: the frame on screen was ingested by an earlier command
+    // buffer, already submitted, so the copy sees it.
+    SubjectEstimate::Inputs in;
+    in.frame = shown_;
+    in.version = subject_version_;
+    in.width = frames_.width();
+    in.height = frames_.height();
+    in.working = ingest_->read_working_raw();
+    in.coverage = frames_.coverage();
+    if (patches_.shown() == shown_ && patches_.texture()) {
+        in.patches = patches_.pixels();
+        in.patch_rect = patches_.rect();
+    }
+    in.fixes = fixes_;
+    subject_est_.request(std::move(in));
+}
+
 void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, float dt) {
+    request_subject();
     advance(cmd);
     root_.timeline()->set_frame(std::max<std::int64_t>(shown_, 0));
     root_.timeline()->set_playing(playing_);
@@ -890,6 +941,19 @@ void EditorApp::composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale) {
         if (patches_.shown() == shown_ && patches_.texture()) {
             frame.rematte = patches_.texture();
             patches_.rect_uv(frame.rematte_rect);
+        }
+        // The estimate of this frame -- even one made before the latest
+        // change, which only the colour of a fix's edge can tell apart --
+        // or the footage until there is one.
+        if (estimating_subject()) {
+            subject_est_.take(cmd);
+            if (subject_est_.shows_frame(shown_)) {
+                frame.subject = subject_est_.texture();
+                frame.subject_mode = gpu::SubjectMode::kStraight;
+            } else {
+                frame.subject = nullptr;
+                frame.subject_mode = gpu::SubjectMode::kFootage;
+            }
         }
         switch (view_) {
             case editor::View::kFootage: view = gpu::DisplayView::kFootage; break;
@@ -1021,6 +1085,25 @@ bool EditorApp::screenshot(const char* path) {
             }
             if (source_ != MatteSource::kNone && patches_.wants(target_)) patches_.wait(target_);
         }
+    }
+
+    // The subject estimate reads back the frame on screen, so it needs a pass
+    // that puts it there first; then it is made, and waited for.
+    if (estimating_subject()) {
+        SDL_GPUCommandBuffer* first = SDL_AcquireGPUCommandBuffer(gpu_->device());
+        if (!first) return false;
+        prepare(first, static_cast<Uint32>(pw), static_cast<Uint32>(ph), 0.0f);
+        SDL_SubmitGPUCommandBuffer(first);
+        request_subject();
+        // The matte may have been fetched again to keep its coverage.
+        if (frames_.shown() != shown_ && frames_.wait(target_)) {
+            SDL_GPUCommandBuffer* again = SDL_AcquireGPUCommandBuffer(gpu_->device());
+            if (!again) return false;
+            prepare(again, static_cast<Uint32>(pw), static_cast<Uint32>(ph), 0.0f);
+            SDL_SubmitGPUCommandBuffer(again);
+            request_subject();
+        }
+        subject_est_.wait();
     }
 
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu_->device());

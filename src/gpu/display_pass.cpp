@@ -22,7 +22,8 @@ struct DisplayUniform {
     float has_fixes;
     float rematte_rect[4];
     float has_rematte;
-    float pad[3];
+    float subject_mode;
+    float pad[2];
 };
 
 // The overlay's wash: the nebula's plum, linear Rec.709, over most of what
@@ -65,7 +66,8 @@ void DisplayPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const 
     info.store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &info, 1, nullptr);
     if (frame.working && frame.width && frame.height && area.w >= 1.0f && area.h >= 1.0f) {
-        if (!frame.matte || (view == DisplayView::kSubject && !frame.subject))
+        if (!frame.matte || (view == DisplayView::kSubject && !frame.subject &&
+                             frame.subject_mode != SubjectMode::kFootage))
             view = DisplayView::kFootage;
 
         // The viewport is the viewer's area, and clips to it; the image is
@@ -90,6 +92,7 @@ void DisplayPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const 
         u.checker_px = kCheckerLogical * scale;
         u.has_fixes = frame.fixes ? 1.0f : 0.0f;
         u.has_rematte = frame.rematte ? 1.0f : 0.0f;
+        u.subject_mode = static_cast<float>(frame.subject_mode);
         for (int i = 0; i < 4; ++i) u.rematte_rect[i] = frame.rematte_rect[i];
 
         SDL_BindGPUGraphicsPipeline(pass, pipeline_);

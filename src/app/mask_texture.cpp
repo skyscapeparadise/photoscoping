@@ -14,14 +14,14 @@ void MaskTexture::destroy() {
     width_ = height_ = 0;
 }
 
-bool MaskTexture::upload(SDL_GPUCommandBuffer* cmd, const std::vector<std::uint8_t>& values,
-                         int width, int height) {
-    if (!device_ || values.size() != static_cast<std::size_t>(width) * height * 4) return false;
+bool MaskTexture::upload(SDL_GPUCommandBuffer* cmd, const void* data, std::size_t size, int width,
+                         int height) {
+    if (!device_ || size != static_cast<std::size_t>(width) * height * bytes_per_pixel_) return false;
     if (!texture_ || width != width_ || height != height_) {
         destroy();
         SDL_GPUTextureCreateInfo info = {};
         info.type = SDL_GPU_TEXTURETYPE_2D;
-        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        info.format = format_;
         info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
         info.width = static_cast<Uint32>(width);
         info.height = static_cast<Uint32>(height);
@@ -30,7 +30,7 @@ bool MaskTexture::upload(SDL_GPUCommandBuffer* cmd, const std::vector<std::uint8
         texture_ = SDL_CreateGPUTexture(device_, &info);
         SDL_GPUTransferBufferCreateInfo tb = {};
         tb.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        tb.size = static_cast<Uint32>(values.size());
+        tb.size = static_cast<Uint32>(size);
         transfer_ = SDL_CreateGPUTransferBuffer(device_, &tb);
         if (!texture_ || !transfer_) {
             SDL_Log("cannot make the mask texture: %s", SDL_GetError());
@@ -42,7 +42,7 @@ bool MaskTexture::upload(SDL_GPUCommandBuffer* cmd, const std::vector<std::uint8
     }
     void* mapped = SDL_MapGPUTransferBuffer(device_, transfer_, /*cycle=*/true);
     if (!mapped) return false;
-    std::memcpy(mapped, values.data(), values.size());
+    std::memcpy(mapped, data, size);
     SDL_UnmapGPUTransferBuffer(device_, transfer_);
 
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);

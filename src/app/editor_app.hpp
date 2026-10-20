@@ -12,6 +12,7 @@
 #include "app/matte_frames.hpp"
 #include "app/matte_job.hpp"
 #include "app/rematte_patches.hpp"
+#include "app/subject_estimate.hpp"
 #include "color/cube_lut.hpp"
 #include "editor/editor_window.hpp"
 #include "editor/inspector.hpp"
@@ -134,6 +135,10 @@ private:
     // After any change to the fixes: the mask, the ruler's keys, and the file.
     void fixes_changed(bool save);
     void undo(bool redo);
+    // The subject view of a clip the app matted: asks for the estimate of the
+    // frame on screen, when it is still, if it has not been asked for.
+    bool estimating_subject() const;
+    void request_subject();
 
     gpu::GpuContext* gpu_ = nullptr;
     gpu::IngestPass* ingest_ = nullptr;
@@ -147,6 +152,12 @@ private:
     MatteJob job_;
     // The re-matte boxes' patches, made by the job run the other way.
     RemattePatches patches_;
+    // The subject's colour for a clip the app matted, worked out live.
+    SubjectEstimate subject_est_;
+    // Counts changes to what the estimate is made from -- the fixes as saved,
+    // the patches -- so it is made again when they change, not on every
+    // step of a drag.
+    std::uint64_t subject_version_ = 0;
     MatteSource source_ = MatteSource::kNone;
 
     // The hand-made fixes for the open clip, kept beside its renders.

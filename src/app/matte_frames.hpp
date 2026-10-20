@@ -40,6 +40,15 @@ public:
     // The shown frame's matte, coverage in red.
     SDL_GPUTexture* texture() const { return shown_ >= 0 ? texture_ : nullptr; }
 
+    // Whether to keep the shown frame's coverage on the CPU as well, for
+    // what is worked out from it there (SubjectEstimate). Off, a frame costs
+    // no more than its upload.
+    void set_keep_coverage(bool keep) { keep_coverage_ = keep; }
+    // The shown frame's coverage, a byte a pixel, if kept: width x height.
+    const std::vector<std::uint8_t>& coverage() const { return coverage_; }
+    int width() const { return width_; }
+    int height() const { return height_; }
+
 protected:
     bool upload(SDL_GPUCommandBuffer* cmd) override;
 
@@ -56,6 +65,8 @@ private:
     SDL_GPUTexture* texture_ = nullptr;
     SDL_GPUTransferBuffer* transfer_ = nullptr;
     int width_ = 0, height_ = 0;
+    bool keep_coverage_ = false;
+    std::vector<std::uint8_t> coverage_;
 };
 
 }  // namespace ps::app
