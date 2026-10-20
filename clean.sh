@@ -48,7 +48,7 @@ echo "  removed .DS_Store files"
 if [ "${CLEAN_VENDOR}" = "1" ]; then
     # Each script knows its own prefix, so ask it rather than hardcoding paths
     # here and having them drift as dependencies are added.
-    for script in vendor/build_*.sh; do
+    for script in vendor/build_*.sh vendor/fetch_*.sh; do
         echo "  cleaning $(basename "${script}" .sh | sed 's/^build_//')..."
         "./${script}" --clean > /dev/null
     done

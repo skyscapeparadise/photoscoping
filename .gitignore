@@ -23,6 +23,7 @@ vendor/freetype/
 vendor/sdl3/
 vendor/sdl3_image/
 vendor/textstack/
+vendor/onnxruntime/
 
 # Footage and render output: kept on disk, deliberately out of git.
 *.mov

@@ -384,6 +384,16 @@ def compare(args) -> int:
             d = np.abs(got - want)
             rows.append((got_path.stem.rsplit("_", 1)[0], frame, d.mean(), d.max(),
                          (d > 1 / 255).mean()))
+    # The model's input as photoscoping prepares it natively (--dump-input),
+    # against the frames prepared here.
+    for native in sorted(OUT.glob("native_input_*.f32")):
+        frame = native.stem.split("_")[-1]
+        python = OUT / f"input_{frame}.f32"
+        if not python.exists():
+            continue
+        d = np.abs(np.fromfile(native, dtype=np.float32) - np.fromfile(python, dtype=np.float32))
+        print(f"input, native vs Python, frame {frame}: max |Δ| {d.max():.2e}, "
+              f"mean {d.mean():.2e} (normalised units)")
     if not rows:
         sys.exit("nothing to compare; run `bench` and the C++ side first")
     print(f"{'':12} {'frame':>7}  {'mean |Δα|':>10}  {'max |Δα|':>9}  {'>1/255':>8}")

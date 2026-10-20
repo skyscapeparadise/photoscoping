@@ -70,6 +70,8 @@ echo "  checking vendored freetype + libpng..."
 ./vendor/build_freetype.sh
 echo "  checking vendored text stack (harfbuzz + SDL3_ttf)..."
 ./vendor/build_text_stack.sh
+echo "  checking vendored ONNX Runtime..."
+./vendor/fetch_onnxruntime.sh
 
 # Not optional despite CMake only warning about it: without the vendored build,
 # CMake falls back to Homebrew's FFmpeg, which is --enable-gpl --enable-version3

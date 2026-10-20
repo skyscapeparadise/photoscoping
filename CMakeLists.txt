@@ -79,6 +79,18 @@ pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil)
 pkg_check_modules(SWSCALE REQUIRED IMPORTED_TARGET libswscale)
 pkg_check_modules(SWRESAMPLE REQUIRED IMPORTED_TARGET libswresample)
 
+# Vendored ONNX Runtime (vendor/fetch_onnxruntime.sh): the matting model, run
+# natively -- Core ML on the Mac. A pinned official release, not a system one.
+set(PHOTOSCOPING_VENDORED_ORT "${CMAKE_CURRENT_SOURCE_DIR}/vendor/onnxruntime")
+if(NOT EXISTS "${PHOTOSCOPING_VENDORED_ORT}/include/onnxruntime_cxx_api.h")
+    message(FATAL_ERROR "Vendored ONNX Runtime missing. Run vendor/fetch_onnxruntime.sh")
+endif()
+add_library(onnxruntime SHARED IMPORTED)
+set_target_properties(onnxruntime PROPERTIES
+    IMPORTED_LOCATION "${PHOTOSCOPING_VENDORED_ORT}/lib/libonnxruntime.1.31.0.dylib"
+    IMPORTED_SONAME "@rpath/libonnxruntime.1.dylib"
+    INTERFACE_INCLUDE_DIRECTORIES "${PHOTOSCOPING_VENDORED_ORT}/include")
+
 # Color math and LUTs: no GPU, no FFmpeg, so the headless tests can link it
 # and check the arithmetic the shaders mirror.
 add_library(photoscoping_color STATIC
@@ -101,6 +113,15 @@ target_link_libraries(photoscoping_media PUBLIC
     PkgConfig::AVFORMAT
     PkgConfig::AVUTIL
 )
+
+# The matting stack, natively: preparing a frame for the model and running it.
+# No GPU of SDL's and no window, so it can be tested headless.
+add_library(photoscoping_matting STATIC
+    src/matting/preprocess.cpp
+    src/matting/matte_model.cpp
+)
+target_include_directories(photoscoping_matting PUBLIC src)
+target_link_libraries(photoscoping_matting PUBLIC onnxruntime)
 
 # Shaders: GLSL is the source of truth, compiled to SPIR-V (glslc) and then to
 # MSL (spirv-cross) into a generated header, the same pipeline as understory.
@@ -156,7 +177,7 @@ target_link_libraries(photoscoping_ui PUBLIC
 add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep_stream.cpp
                             src/app/matte_frames.cpp src/app/matte_job.cpp
                             src/app/clip_frames.cpp)
-target_link_libraries(photoscoping PRIVATE photoscoping_ui)
+target_link_libraries(photoscoping PRIVATE photoscoping_ui photoscoping_matting)
 
 if(APPLE)
     target_sources(photoscoping PRIVATE src/app/tracking_ticker_mac.mm src/app/file_menu_mac.mm)
