@@ -32,18 +32,21 @@ SDL_Cursor* resize_cursor() {
 }  // namespace
 
 void EditorWindow::build(ui::FontCache& fonts, const gpu::IconAtlas& large_icons,
-                         const gpu::IconAtlas& small_icons) {
+                         const gpu::IconAtlas& small_icons, fixes::Fixes* fixes) {
     anchors = ui::Anchors::Fill();
     reveal_.set_behavior(0.24f, ui::Easing::kInOutCubic);
 
     // First, so the panel and the timeline are over it where they meet.
     viewer_ = add<Viewer>();
     viewer_->build(fonts);
+    garbage_ = viewer_->add<GarbageTool>();
+    garbage_->attach(viewer_, fixes);
 
     inspector_ = add<Inspector>();
     inspector_->build(fonts, large_icons);
     inspector_->on_tool_changed = [this](Tool tool) {
         viewer_->set_navigating(tool == Tool::kNavigate);
+        garbage_->set_active(tool == Tool::kGarbage);
     };
     inspector_->tools()->on_preview = [this] { toggle_panel(); };
 

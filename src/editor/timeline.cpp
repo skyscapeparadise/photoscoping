@@ -240,6 +240,13 @@ void Timeline::set_matted(const std::vector<bool>& matted) {
     refresh_playhead();
 }
 
+void Timeline::set_keys(const std::vector<std::int64_t>& frames) {
+    if (frames == keys_) return;
+    keys_ = frames;
+    built_width_ = -1.0f;  // the marks are part of the ruler
+    refresh_playhead();
+}
+
 void Timeline::layout_self() {
     const bool show_clock = width - kTimecodeWidth - kTransportWidth >= kMinRuler;
     const float right = kTransportWidth + (show_clock ? kTimecodeWidth : 0.0f);
@@ -326,6 +333,22 @@ void Timeline::rebuild_ruler() {
     clip_span_->height = kHeight;
     clip_span_->fill = theme::kClipSpan;
     clip_span_->width = static_cast<float>(frame_seconds(frame_count_)) * pixels_per_second_;
+    // A small diamond -- a square on its point -- for each frame a fix has a
+    // key on, below the matte line: a rounded square read at this size is
+    // close enough, and needs no triangles.
+    for (std::int64_t frame : keys_) {
+        if (frame < 0 || frame >= frame_count_) continue;
+        auto* key = ticks_->add<ui::RectNode>();
+        // At the frame's start, where the playhead stands on it.
+        const float cx = static_cast<float>(frame_seconds(frame)) * pixels_per_second_;
+        key->x = cx - 3.5f;
+        key->y = 7.0f;
+        key->width = 7.0f;
+        key->height = 7.0f;
+        key->radius = 2.0f;
+        key->fill = theme::kWhite;
+    }
+
     // One mark per unbroken run of matted frames, rather than one per frame.
     const auto runs = static_cast<std::int64_t>(std::min<std::size_t>(
         matted_.size(), static_cast<std::size_t>(std::max<std::int64_t>(0, frame_count_))));

@@ -8,11 +8,13 @@
 
 #include "app/clip_frames.hpp"
 #include "app/lockstep_stream.hpp"
+#include "app/mask_texture.hpp"
 #include "app/matte_frames.hpp"
 #include "app/matte_job.hpp"
 #include "color/cube_lut.hpp"
 #include "editor/editor_window.hpp"
 #include "editor/inspector.hpp"
+#include "fixes/fixes.hpp"
 #include "gpu/display_pass.hpp"
 #include "gpu/draw_list.hpp"
 #include "gpu/gpu_context.hpp"
@@ -123,6 +125,9 @@ private:
     void refresh_matte_ui();
     void toggle_job();
     void poll_job();
+    // After any change to the fixes: the mask, the ruler's keys, and the file.
+    void fixes_changed(bool save);
+    void undo(bool redo);
 
     gpu::GpuContext* gpu_ = nullptr;
     gpu::IngestPass* ingest_ = nullptr;
@@ -135,6 +140,19 @@ private:
     MatteFrames frames_;
     MatteJob job_;
     MatteSource source_ = MatteSource::kNone;
+
+    // The hand-made fixes for the open clip, kept beside its renders.
+    fixes::Fixes fixes_;
+    fixes::History history_;
+    // Counts changes, so the mask is rebuilt only when the fixes or the
+    // frame have moved since it was last made.
+    std::uint64_t fixes_version_ = 0;
+    std::uint64_t mask_version_ = ~0ull;
+    std::int64_t mask_frame_ = -1;
+    MaskTexture mask_;
+    // Whether the clip's fixes file read cleanly (or was not there); if it
+    // did not, it is never saved over.
+    bool fixes_readable_ = true;
     Uint64 job_started_ns_ = 0;
     std::int64_t done_at_start_ = 0;
     Uint64 last_poll_ns_ = 0;

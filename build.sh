@@ -70,6 +70,8 @@ echo "  checking vendored freetype + libpng..."
 ./vendor/build_freetype.sh
 echo "  checking vendored text stack (harfbuzz + SDL3_ttf)..."
 ./vendor/build_text_stack.sh
+echo "  checking vendored nlohmann/json..."
+./vendor/build_json.sh
 echo "  checking vendored ONNX Runtime..."
 ./vendor/fetch_onnxruntime.sh
 

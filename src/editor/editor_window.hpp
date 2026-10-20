@@ -1,5 +1,6 @@
 #pragma once
 
+#include "editor/garbage_tool.hpp"
 #include "editor/inspector.hpp"
 #include "editor/timeline.hpp"
 #include "editor/viewer.hpp"
@@ -22,11 +23,13 @@ class EditorWindow : public ui::Node {
 public:
     // The hands come from `large_icons`, the transport's glyphs from
     // `small_icons`: the same art, rasterized for each size.
+    // `fixes` are the app's, edited in place by the tools over the viewer.
     void build(ui::FontCache& fonts, const gpu::IconAtlas& large_icons,
-               const gpu::IconAtlas& small_icons);
+               const gpu::IconAtlas& small_icons, fixes::Fixes* fixes);
 
     Inspector* inspector() const { return inspector_; }
     Viewer* viewer() const { return viewer_; }
+    GarbageTool* garbage_tool() const { return garbage_; }
     Timeline* timeline() const { return timeline_; }
 
     // In logical pixels, as of the last layout. The footage and the nebula are
@@ -49,6 +52,7 @@ private:
     void refresh_splitter_look();
 
     Viewer* viewer_ = nullptr;
+    GarbageTool* garbage_ = nullptr;
     Inspector* inspector_ = nullptr;
     Timeline* timeline_ = nullptr;
     ui::Node* splitter_ = nullptr;

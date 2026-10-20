@@ -34,6 +34,8 @@ public:
     // Which of the clip's frames have a matte, one entry per frame. Marked
     // along the top of the ruler, so a run in progress fills it in.
     void set_matted(const std::vector<bool>& matted);
+    // The frames hand-made fixes have keys on: marked under the matte line.
+    void set_keys(const std::vector<std::int64_t>& frames);
 
     std::function<void(std::int64_t)> on_seek;
     std::function<void(bool)> on_play;   // true to play, false to pause
@@ -60,6 +62,7 @@ private:
     std::int64_t frame_count_ = 0;
     std::int64_t frame_ = 0;
     std::vector<bool> matted_;
+    std::vector<std::int64_t> keys_;
     bool playing_ = false;
     bool fit_pending_ = false;
 

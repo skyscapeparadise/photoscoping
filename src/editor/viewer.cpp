@@ -37,28 +37,14 @@ void Viewer::build(ui::FontCache& fonts) {
         else if (!panning_) SDL_SetCursor(SDL_GetDefaultCursor());
     };
     on_press = [this](float x, float y) {
-        panning_ = navigating_ || space_held_;
         last_x_ = x;
         last_y_ = y;
+        if (navigating_ || space_held_) begin_pan(x, y);
     };
-    on_drag = [this](float x, float y) {
-        if (!panning_) return;
-        centre_x_ -= (x - last_x_) / scale_;
-        centre_y_ -= (y - last_y_) / scale_;
-        last_x_ = x;
-        last_y_ = y;
-        fitted_ = false;
-        if (space_held_) space_panned_ = true;
-        clamp_centre();
-        refresh_readout();
-    };
-    on_release = [this] { panning_ = false; };
-    on_middle_press = [this](float x, float y) {
-        panning_ = true;
-        last_x_ = x;
-        last_y_ = y;
-    };
-    on_middle_release = [this] { panning_ = false; };
+    on_drag = [this](float x, float y) { pan_to(x, y); };
+    on_release = [this] { end_pan(); };
+    on_middle_press = [this](float x, float y) { begin_pan(x, y); };
+    on_middle_release = [this] { end_pan(); };
     on_double_click = [this] {
         if (!navigating_) return;
         // Between fit and one image pixel to one device pixel, about the
@@ -87,6 +73,26 @@ void Viewer::build(ui::FontCache& fonts) {
     };
     keeps_drag = true;
 }
+
+void Viewer::begin_pan(float x, float y) {
+    panning_ = true;
+    last_x_ = x;
+    last_y_ = y;
+}
+
+void Viewer::pan_to(float x, float y) {
+    if (!panning_) return;
+    centre_x_ -= (x - last_x_) / scale_;
+    centre_y_ -= (y - last_y_) / scale_;
+    last_x_ = x;
+    last_y_ = y;
+    fitted_ = false;
+    if (space_held_) space_panned_ = true;
+    clamp_centre();
+    refresh_readout();
+}
+
+void Viewer::end_pan() { panning_ = false; }
 
 void Viewer::set_image_size(int width, int height) {
     if (width == image_w_ && height == image_h_) return;
@@ -170,6 +176,12 @@ gpu::Rect Viewer::image_rect() const {
 }
 
 bool Viewer::magnified() const { return scale_ * device_scale_ >= kNearestFrom; }
+
+void Viewer::from_image(float ix, float iy, float* x, float* y) const {
+    const gpu::Rect r = image_rect();
+    *x = r.x + ix * scale_;
+    *y = r.y + iy * scale_;
+}
 
 void Viewer::to_image(float x, float y, float* ix, float* iy) const {
     const gpu::Rect r = image_rect();

@@ -49,6 +49,16 @@ public:
     bool magnified() const;
     // Absolute logical coordinates to image pixels, and back.
     void to_image(float x, float y, float* ix, float* iy) const;
+    void from_image(float ix, float iy, float* x, float* y) const;
+    // Logical pixels per image pixel.
+    float scale() const { return scale_; }
+    bool space_held() const { return space_held_; }
+
+    // A pan driven from outside: a tool over the viewer that has the pointer
+    // hands its space- and middle-drags here.
+    void begin_pan(float x, float y);
+    void pan_to(float x, float y);
+    void end_pan();
 
 protected:
     void layout_self() override;

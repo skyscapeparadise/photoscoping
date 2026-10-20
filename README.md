@@ -46,6 +46,20 @@ each frame's matte lands in `renders/<clip>_mattes/` as a 16-bit PNG. Stopping
 it, or closing the window, keeps every finished frame; resuming picks up from
 there. Its output goes to `renders/<clip>_matte.log`.
 
+Fixes made by hand go on top of the matte rather than into it, so changing
+one never means matting again. They are keyframed: set at the frames that
+need them, interpolated between, held before the first key and after the
+last, and kept in `renders/<clip>_fixes.json`. Command-Z and Shift-Command-Z
+undo and redo them.
+
+The garbage tool draws garbage mattes -- shapes the subject is always inside;
+outside them the matte is forced to background. Click to place points, and
+click the first point, double-click or press Return to close the shape. Drag
+a point to move it, or an edge to move the whole shape; either keys the
+current frame. Backspace removes the selected shape's key on this frame (or
+the shape, if it has no other), Shift-Backspace the whole shape, and Escape
+abandons one being drawn. Their keys are marked along the ruler.
+
 The viewer shows a matte four ways: the footage, the matte, the matted subject
 over a checkerboard, or the footage washed purple wherever the matte drops it.
 The pills under the inspector switch between them, as do the keys 1-4, and a

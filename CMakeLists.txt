@@ -100,6 +100,14 @@ add_library(photoscoping_color STATIC
 )
 target_include_directories(photoscoping_color PUBLIC src)
 
+# Fixes made by hand to a matte: keyframed shapes, their file, undo, and the
+# masks they make. Plain data and arithmetic, tested headless.
+add_library(photoscoping_fixes STATIC
+    src/fixes/fixes.cpp
+    src/fixes/mask.cpp
+)
+target_include_directories(photoscoping_fixes PUBLIC src "${CMAKE_CURRENT_SOURCE_DIR}/vendor/json")
+
 # Decoding: FFmpeg, no GPU.
 add_library(photoscoping_media STATIC
     src/media/video_decoder.cpp
@@ -179,10 +187,13 @@ add_library(photoscoping_ui STATIC
     src/editor/inspector.cpp
     src/editor/editor_window.cpp
     src/editor/viewer.cpp
+    src/editor/lines.cpp
+    src/editor/garbage_tool.cpp
 )
 add_dependencies(photoscoping_ui photoscoping_shaders)
 target_include_directories(photoscoping_ui PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(photoscoping_ui PUBLIC
+    photoscoping_fixes
     photoscoping_color
     photoscoping_media
     SDL3::SDL3
@@ -192,8 +203,8 @@ target_link_libraries(photoscoping_ui PUBLIC
 
 add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep_stream.cpp
                             src/app/matte_frames.cpp src/app/matte_job.cpp
-                            src/app/clip_frames.cpp)
-target_link_libraries(photoscoping PRIVATE photoscoping_ui photoscoping_matting)
+                            src/app/clip_frames.cpp src/app/mask_texture.cpp)
+target_link_libraries(photoscoping PRIVATE photoscoping_ui photoscoping_matting photoscoping_fixes)
 
 if(APPLE)
     target_sources(photoscoping PRIVATE src/app/tracking_ticker_mac.mm src/app/file_menu_mac.mm)
@@ -207,3 +218,7 @@ enable_testing()
 add_executable(color_tests tests/test_color.cpp)
 target_link_libraries(color_tests PRIVATE photoscoping_color)
 add_test(NAME color COMMAND color_tests)
+
+add_executable(fixes_tests tests/test_fixes.cpp)
+target_link_libraries(fixes_tests PRIVATE photoscoping_fixes)
+add_test(NAME fixes COMMAND fixes_tests)

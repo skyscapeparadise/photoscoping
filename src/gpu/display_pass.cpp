@@ -19,7 +19,7 @@ struct DisplayUniform {
     float nits_per_unit;
     float view;
     float checker_px;
-    float pad;
+    float has_garbage;
 };
 
 // The overlay's wash: the nebula's plum, linear Rec.709, over most of what
@@ -33,7 +33,7 @@ DisplayPass::~DisplayPass() { destroy(); }
 
 bool DisplayPass::create(const GpuContext& gpu) {
     device_ = gpu.device();
-    pipeline_ = create_quad_pipeline(device_, shaders::kDisplayFragment, 3, gpu.linear_format());
+    pipeline_ = create_quad_pipeline(device_, shaders::kDisplayFragment, 4, gpu.linear_format());
     // Linear filtering for now; an 8K frame in a small viewer aliases, which
     // a mip chain or a proper downscale will fix when the viewer gets one.
     sampler_ = create_sampler(device_, SDL_GPU_FILTER_LINEAR);
@@ -85,17 +85,21 @@ void DisplayPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const 
         u.nits_per_unit = DrawList::kSdrRefNits;
         u.view = static_cast<float>(view);
         u.checker_px = kCheckerLogical * scale;
+        u.has_garbage = frame.garbage ? 1.0f : 0.0f;
 
         SDL_BindGPUGraphicsPipeline(pass, pipeline_);
         // Every declared sampler must be bound; a texture a view does not
         // read stands in with the footage.
         SDL_GPUSampler* sampler = nearest ? nearest_ : sampler_;
-        const SDL_GPUTextureSamplerBinding bindings[3] = {
+        // The mask is always filtered: it is half the frame's resolution, and
+        // its edges are meant to be soft.
+        const SDL_GPUTextureSamplerBinding bindings[4] = {
             {frame.working, sampler},
             {frame.matte ? frame.matte : frame.working, sampler},
             {frame.subject ? frame.subject : frame.working, sampler},
+            {frame.garbage ? frame.garbage : frame.working, sampler_},
         };
-        SDL_BindGPUFragmentSamplers(pass, 0, bindings, 3);
+        SDL_BindGPUFragmentSamplers(pass, 0, bindings, 4);
         SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof u);
         draw_quad(cmd, pass, QuadRect{{x0, y_bottom, x1, y_top}});
     }

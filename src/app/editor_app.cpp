@@ -11,6 +11,7 @@
 #include "app/file_menu.hpp"
 #include "app/tracking_ticker.hpp"
 #include "editor/theme.hpp"
+#include "fixes/mask.hpp"
 
 namespace ps::app {
 
@@ -149,7 +150,12 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options op
         return false;
     if (!build_atlases()) return false;
 
-    root_.build(fonts_, large_icons_, small_icons_);
+    root_.build(fonts_, large_icons_, small_icons_, &fixes_);
+    mask_.create(gpu.device());
+    editor::GarbageTool* garbage = root_.garbage_tool();
+    garbage->on_edit_begin = [this] { history_.record(fixes_); };
+    garbage->on_live_change = [this] { fixes_changed(/*save=*/false); };
+    garbage->on_changed = [this] { fixes_changed(/*save=*/true); };
     root_.inspector()->views()->on_view_changed = [this](editor::View view) { view_ = view; };
     root_.inspector()->on_action = [this] { toggle_job(); };
     job_.locate();
@@ -206,6 +212,7 @@ void EditorApp::destroy() {
     frames_.destroy();
     matte_.destroy();
     subject_.destroy();
+    mask_.destroy();
     large_icons_.destroy();
     small_icons_.destroy();
     fonts_.destroy();
@@ -251,6 +258,14 @@ bool EditorApp::open_clip(const std::string& path, std::int64_t frame) {
     frames_.open(gpu_->device(), render_path("_mattes"), clip_.frame_count());
     choose_matte_source();
     refresh_matte_ui();
+
+    std::string error;
+    if (!fixes_.load(render_path("_fixes.json"), &error))
+        SDL_Log("cannot read %s (%s); it is left as it is, and not written over",
+                render_path("_fixes.json").c_str(), error.c_str());
+    fixes_readable_ = error.empty();
+    history_.clear();
+    fixes_changed(/*save=*/false);
     SDL_Log("opened %s", path.c_str());
     return true;
 }
@@ -444,6 +459,22 @@ void EditorApp::poll_job() {
     refresh_matte_ui();
 }
 
+void EditorApp::fixes_changed(bool save) {
+    ++fixes_version_;
+    root_.timeline()->set_keys(fixes_.key_frames());
+    if (!save || !clip_.is_open()) return;
+    // A file that would not read is never written over: whatever is in it
+    // may be the only copy of someone's work.
+    if (!fixes_readable_) return;
+    std::string error;
+    if (!fixes_.save(render_path("_fixes.json"), &error))
+        SDL_Log("cannot save the fixes: %s", error.c_str());
+}
+
+void EditorApp::undo(bool redo) {
+    if (redo ? history_.redo(fixes_) : history_.undo(fixes_)) fixes_changed(/*save=*/true);
+}
+
 void EditorApp::set_playing(bool playing) {
     if (!clip_.is_open()) return;
     playing_ = playing;
@@ -492,6 +523,11 @@ void EditorApp::handle(const SDL_Event& event) {
         }
         case SDL_EVENT_KEY_DOWN: {
             const std::int64_t at = std::max<std::int64_t>(shown_, 0);
+            if (root_.garbage_tool()->handle_key(event.key.key, event.key.mod)) break;
+            if ((event.key.mod & (SDL_KMOD_GUI | SDL_KMOD_CTRL)) != 0 && event.key.key == SDLK_Z) {
+                undo(/*redo=*/(event.key.mod & SDL_KMOD_SHIFT) != 0);
+                break;
+            }
             // Command (Control elsewhere) with these is the view's zoom, as
             // in every Mac app that has one.
             if ((event.key.mod & (SDL_KMOD_GUI | SDL_KMOD_CTRL)) != 0) {
@@ -638,6 +674,7 @@ void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, 
     const float scale = lw > 0 ? static_cast<float>(width) / lw : 1.0f;
 
     root_.viewer()->set_device_scale(scale);
+    root_.garbage_tool()->set_frame(std::max<std::int64_t>(shown_, 0));
     root_.layout(static_cast<float>(lw), static_cast<float>(lh));
     input_.update(root_);
     animating_ = root_.tick(dt);
@@ -660,6 +697,20 @@ void EditorApp::composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale) {
         frame.height = ingest_->height();
         // Only renders of the frame on screen: one still catching up after a
         // change of view is left out, and the footage shows alone meanwhile.
+        // The garbage mattes' mask, made again only when they or the frame
+        // have changed, and only for a view that uses the matte.
+        if (!fixes_.garbage.empty() && view_ != editor::View::kFootage) {
+            if (mask_version_ != fixes_version_ || mask_frame_ != shown_) {
+                const int mw = std::max(1, static_cast<int>(frame.width) / 2);
+                const int mh = std::max(1, static_cast<int>(frame.height) / 2);
+                const float sx = static_cast<float>(mw) / static_cast<float>(frame.width);
+                if (mask_.upload(cmd, fixes::garbage_mask(fixes_, shown_, mw, mh, sx), mw, mh)) {
+                    mask_version_ = fixes_version_;
+                    mask_frame_ = shown_;
+                }
+            }
+            frame.garbage = mask_.texture();
+        }
         if (source_ == MatteSource::kFrames && frames_.shown() == shown_) {
             frame.matte = frames_.texture();
         } else if (source_ == MatteSource::kVideos) {

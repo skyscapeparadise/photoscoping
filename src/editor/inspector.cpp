@@ -20,7 +20,7 @@ void Inspector::build(ui::FontCache& fonts, const gpu::IconAtlas& atlas) {
     fonts_ = &fonts;
 
     tools_ = add<ToolStrip>();
-    tools_->build(atlas);
+    tools_->build(atlas, fonts);
     tools_->on_tool_changed = [this](Tool tool) {
         heading_->set_text(tool_label(tool));
         if (on_tool_changed) on_tool_changed(tool);

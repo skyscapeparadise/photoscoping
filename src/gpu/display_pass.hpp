@@ -34,6 +34,8 @@ public:
         Uint32 width = 0, height = 0;
         SDL_GPUTexture* matte = nullptr;
         SDL_GPUTexture* subject = nullptr;
+        // What the garbage mattes leave, in red; null when there are none.
+        SDL_GPUTexture* garbage = nullptr;
     };
 
     // Records a pass that clears `target` to `background` (linear nits,
