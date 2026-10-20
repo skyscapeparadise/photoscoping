@@ -25,7 +25,16 @@ A clip can also be opened by dropping it on the window or with File > Open
 instead. Footage and mattes decode on threads of their own, so seeking never
 stalls the window.
 
-Space plays and pauses, left/right step a frame, home returns to the start,
+The viewer zooms and pans. Pinch, or Command, Control or Option with the
+scroll wheel, zooms about the pointer; two-finger scrolling pans, as does
+dragging with the navigate tool, with Space held, or with the middle button.
+Command-0 fits the frame, Command-1 shows it at actual pixels, Command-= and
+Command-- zoom in and out, and a double-click with the navigate tool goes
+between fit and actual pixels. Past two screen pixels an image pixel, the
+footage is shown unfiltered, so single pixels read as squares.
+
+Space plays and pauses (on release, so a hold can pan instead), left/right
+step a frame, home returns to the start,
 and tab shows or hides the inspector. The window resizes freely: the viewer
 takes what the inspector and timeline leave, the inspector can be dragged
 wider or narrower by its left edge, and it folds away when the window gets

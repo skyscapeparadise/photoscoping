@@ -37,21 +37,24 @@ bool DisplayPass::create(const GpuContext& gpu) {
     // Linear filtering for now; an 8K frame in a small viewer aliases, which
     // a mip chain or a proper downscale will fix when the viewer gets one.
     sampler_ = create_sampler(device_, SDL_GPU_FILTER_LINEAR);
-    return pipeline_ && sampler_;
+    nearest_ = create_sampler(device_, SDL_GPU_FILTER_NEAREST);
+    return pipeline_ && sampler_ && nearest_;
 }
 
 void DisplayPass::destroy() {
     if (!device_) return;
     if (pipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, pipeline_);
     if (sampler_) SDL_ReleaseGPUSampler(device_, sampler_);
+    if (nearest_) SDL_ReleaseGPUSampler(device_, nearest_);
     pipeline_ = nullptr;
     sampler_ = nullptr;
+    nearest_ = nullptr;
     device_ = nullptr;
 }
 
 void DisplayPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const SDL_FRect& area,
-                       const Frame& frame, DisplayView view, float scale,
-                       SDL_FColor background) {
+                       const SDL_FRect& image, const Frame& frame, DisplayView view, float scale,
+                       bool nearest, SDL_FColor background) {
     SDL_GPUColorTargetInfo info = {};
     info.texture = target;
     info.clear_color = background;
@@ -62,13 +65,15 @@ void DisplayPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const 
         if (!frame.matte || (view == DisplayView::kSubject && !frame.subject))
             view = DisplayView::kFootage;
 
-        // The viewport is the viewer's area; within it, fit and centre with
-        // the aspect preserved. Quad coordinates are NDC of the viewport.
+        // The viewport is the viewer's area, and clips to it; the image is
+        // placed within it in the viewport's NDC, y up, so its top edge is
+        // the larger number.
         const SDL_GPUViewport viewport = {area.x, area.y, area.w, area.h, 0.0f, 1.0f};
         SDL_SetGPUViewport(pass, &viewport);
-        const float fit = std::min(area.w / frame.width, area.h / frame.height);
-        const float sx = frame.width * fit / area.w;
-        const float sy = frame.height * fit / area.h;
+        const float x0 = (image.x - area.x) / area.w * 2.0f - 1.0f;
+        const float x1 = (image.x + image.w - area.x) / area.w * 2.0f - 1.0f;
+        const float y_top = 1.0f - (image.y - area.y) / area.h * 2.0f;
+        const float y_bottom = 1.0f - (image.y + image.h - area.y) / area.h * 2.0f;
 
         DisplayUniform u = {};
         const color::Mat3 m = color::working_to_rec709();
@@ -84,14 +89,15 @@ void DisplayPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const 
         SDL_BindGPUGraphicsPipeline(pass, pipeline_);
         // Every declared sampler must be bound; a texture a view does not
         // read stands in with the footage.
+        SDL_GPUSampler* sampler = nearest ? nearest_ : sampler_;
         const SDL_GPUTextureSamplerBinding bindings[3] = {
-            {frame.working, sampler_},
-            {frame.matte ? frame.matte : frame.working, sampler_},
-            {frame.subject ? frame.subject : frame.working, sampler_},
+            {frame.working, sampler},
+            {frame.matte ? frame.matte : frame.working, sampler},
+            {frame.subject ? frame.subject : frame.working, sampler},
         };
         SDL_BindGPUFragmentSamplers(pass, 0, bindings, 3);
         SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof u);
-        draw_quad(cmd, pass, QuadRect{{-sx, -sy, sx, sy}});
+        draw_quad(cmd, pass, QuadRect{{x0, y_bottom, x1, y_top}});
     }
     SDL_EndGPURenderPass(pass);
 }

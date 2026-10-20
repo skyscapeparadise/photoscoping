@@ -246,6 +246,7 @@ bool EditorApp::open_clip(const std::string& path, std::int64_t frame) {
     shown_ = -1;
     target_ = std::clamp<std::int64_t>(frame, 0, std::max<std::int64_t>(0, clip_.frame_count() - 1));
     root_.timeline()->set_clip(clip_.frame_rate(), clip_.frame_count());
+    root_.viewer()->set_image_size(clip_.decoder().width(), clip_.decoder().height());
 
     frames_.open(gpu_->device(), render_path("_mattes"), clip_.frame_count());
     choose_matte_source();
@@ -471,11 +472,49 @@ void EditorApp::handle(const SDL_Event& event) {
         case SDL_EVENT_DROP_FILE:
             if (event.drop.data) open_path(event.drop.data);
             break;
+        case SDL_EVENT_KEY_UP:
+            // Space is play and pause, and held it is also the pan: so it acts
+            // on release, and only if the hold was not used to pan.
+            if (event.key.key == SDLK_SPACE) {
+                editor::Viewer* viewer = root_.viewer();
+                viewer->set_space_held(false);
+                if (!viewer->space_panned()) set_playing(!playing_);
+            }
+            break;
+        case SDL_EVENT_PINCH_UPDATE: {
+            editor::Viewer* viewer = root_.viewer();
+            float px = 0.0f, py = 0.0f;
+            SDL_GetMouseState(&px, &py);
+            if (px >= viewer->abs_x() && px < viewer->abs_x() + viewer->width &&
+                py >= viewer->abs_y() && py < viewer->abs_y() + viewer->height)
+                viewer->zoom_at(event.pinch.scale, px, py);
+            break;
+        }
         case SDL_EVENT_KEY_DOWN: {
             const std::int64_t at = std::max<std::int64_t>(shown_, 0);
+            // Command (Control elsewhere) with these is the view's zoom, as
+            // in every Mac app that has one.
+            if ((event.key.mod & (SDL_KMOD_GUI | SDL_KMOD_CTRL)) != 0) {
+                editor::Viewer* viewer = root_.viewer();
+                // The keypad's keys too, which arrive as keys of their own.
+                switch (event.key.key) {
+                    case SDLK_0:
+                    case SDLK_KP_0: viewer->fit(); break;
+                    case SDLK_1:
+                    case SDLK_KP_1: viewer->actual_pixels(); break;
+                    case SDLK_EQUALS:
+                    case SDLK_PLUS:
+                    case SDLK_KP_EQUALS:
+                    case SDLK_KP_PLUS: viewer->zoom_by(2.0f); break;
+                    case SDLK_MINUS:
+                    case SDLK_KP_MINUS: viewer->zoom_by(0.5f); break;
+                    default: break;
+                }
+                break;
+            }
             switch (event.key.key) {
                 case SDLK_SPACE:
-                    if (!event.key.repeat) set_playing(!playing_);
+                    if (!event.key.repeat) root_.viewer()->set_space_held(true);
                     break;
                 case SDLK_RIGHT:
                     if (clip_.is_open()) { set_playing(false); target_ = at + 1; }
@@ -493,10 +532,14 @@ void EditorApp::handle(const SDL_Event& event) {
                 case SDLK_TAB:
                     if (!event.key.repeat) root_.toggle_panel();
                     break;
-                case SDLK_1: root_.inspector()->views()->set_view(editor::View::kFootage); break;
-                case SDLK_2: root_.inspector()->views()->set_view(editor::View::kMatte); break;
-                case SDLK_3: root_.inspector()->views()->set_view(editor::View::kSubject); break;
-                case SDLK_4: root_.inspector()->views()->set_view(editor::View::kOverlay); break;
+                case SDLK_1:
+                case SDLK_KP_1: root_.inspector()->views()->set_view(editor::View::kFootage); break;
+                case SDLK_2:
+                case SDLK_KP_2: root_.inspector()->views()->set_view(editor::View::kMatte); break;
+                case SDLK_3:
+                case SDLK_KP_3: root_.inspector()->views()->set_view(editor::View::kSubject); break;
+                case SDLK_4:
+                case SDLK_KP_4: root_.inspector()->views()->set_view(editor::View::kOverlay); break;
                 default: break;
             }
             break;
@@ -594,6 +637,7 @@ void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, 
     SDL_GetWindowSize(gpu_->window(), &lw, &lh);
     const float scale = lw > 0 ? static_cast<float>(width) / lw : 1.0f;
 
+    root_.viewer()->set_device_scale(scale);
     root_.layout(static_cast<float>(lw), static_cast<float>(lh));
     input_.update(root_);
     animating_ = root_.tick(dt);
@@ -629,8 +673,10 @@ void EditorApp::composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale) {
             case editor::View::kOverlay: view = gpu::DisplayView::kOverlay; break;
         }
     }
-    display_.draw(cmd, gpu_->linear_target(), to_device(root_.viewer_rect(), scale), frame, view,
-                  scale, viewer_background());
+    editor::Viewer* viewer = root_.viewer();
+    display_.draw(cmd, gpu_->linear_target(), to_device(root_.viewer_rect(), scale),
+                  to_device(viewer->image_rect(), scale), frame, view, scale,
+                  viewer->magnified(), viewer_background());
     const gpu::Rect panel = root_.panel_rect();
     nebula_.draw(cmd, gpu_->linear_target(), to_device(panel, scale), panel.w, panel.h,
                  root_.panel_width(), nebula_time_);

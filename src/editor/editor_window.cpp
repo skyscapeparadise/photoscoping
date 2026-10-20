@@ -36,8 +36,15 @@ void EditorWindow::build(ui::FontCache& fonts, const gpu::IconAtlas& large_icons
     anchors = ui::Anchors::Fill();
     reveal_.set_behavior(0.24f, ui::Easing::kInOutCubic);
 
+    // First, so the panel and the timeline are over it where they meet.
+    viewer_ = add<Viewer>();
+    viewer_->build(fonts);
+
     inspector_ = add<Inspector>();
     inspector_->build(fonts, large_icons);
+    inspector_->on_tool_changed = [this](Tool tool) {
+        viewer_->set_navigating(tool == Tool::kNavigate);
+    };
     inspector_->tools()->on_preview = [this] { toggle_panel(); };
 
     timeline_ = add<Timeline>();
@@ -113,6 +120,12 @@ void EditorWindow::layout_self() {
     splitter_line_->x = kSplitterGrab - 1.0f;
     splitter_line_->width = 2.0f;
     splitter_line_->height = content_h;
+
+    const gpu::Rect view = viewer_rect();
+    viewer_->x = view.x;
+    viewer_->y = view.y;
+    viewer_->width = view.w;
+    viewer_->height = view.h;
 
     timeline_->x = 0.0f;
     timeline_->y = content_h;

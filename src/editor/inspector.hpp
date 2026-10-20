@@ -44,6 +44,9 @@ public:
     // it out and ignores clicks.
     void set_action(const std::string& label, bool enabled);
     std::function<void()> on_action;
+    // After the card has followed a change of tool, for anything else that
+    // follows it.
+    std::function<void(Tool)> on_tool_changed;
 
 protected:
     void layout_self() override;

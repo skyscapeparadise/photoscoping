@@ -21,7 +21,10 @@ void Inspector::build(ui::FontCache& fonts, const gpu::IconAtlas& atlas) {
 
     tools_ = add<ToolStrip>();
     tools_->build(atlas);
-    tools_->on_tool_changed = [this](Tool tool) { heading_->set_text(tool_label(tool)); };
+    tools_->on_tool_changed = [this](Tool tool) {
+        heading_->set_text(tool_label(tool));
+        if (on_tool_changed) on_tool_changed(tool);
+    };
 
     card_ = add<ui::RectNode>();
     card_->border_width = kCardBorder;

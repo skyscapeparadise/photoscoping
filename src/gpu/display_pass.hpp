@@ -14,8 +14,8 @@ enum class DisplayView {
     kOverlay = 3,   // the footage, washed wherever the matte drops it
 };
 
-// Draws the working image into the viewer's area of the linear target,
-// letterboxed to keep its aspect.
+// Draws the working image into the viewer's area of the linear target, where
+// the viewer has placed it: fitted, or zoomed and panned.
 class DisplayPass {
 public:
     DisplayPass() = default;
@@ -38,16 +38,20 @@ public:
 
     // Records a pass that clears `target` to `background` (linear nits,
     // premultiplied) and draws `frame` (no working image: background only)
-    // fitted inside `area`, which is in device pixels. Opens the frame, so it
-    // clears rather than loads. `scale` is device pixels per logical pixel,
-    // which the checkerboard is measured in.
+    // into `image`, clipped to `area`; both in device pixels, `image` free to
+    // run past `area` when zoomed in. Opens the frame, so it clears rather
+    // than loads. `scale` is device pixels per logical pixel, which the
+    // checkerboard is measured in. `nearest` samples without filtering, so
+    // magnified pixels read as squares.
     void draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const SDL_FRect& area,
-              const Frame& frame, DisplayView view, float scale, SDL_FColor background);
+              const SDL_FRect& image, const Frame& frame, DisplayView view, float scale,
+              bool nearest, SDL_FColor background);
 
 private:
     SDL_GPUDevice* device_ = nullptr;
     SDL_GPUGraphicsPipeline* pipeline_ = nullptr;
     SDL_GPUSampler* sampler_ = nullptr;
+    SDL_GPUSampler* nearest_ = nullptr;
 };
 
 }  // namespace ps::gpu

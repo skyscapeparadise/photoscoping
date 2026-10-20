@@ -178,6 +178,7 @@ add_library(photoscoping_ui STATIC
     src/editor/timeline.cpp
     src/editor/inspector.cpp
     src/editor/editor_window.cpp
+    src/editor/viewer.cpp
 )
 add_dependencies(photoscoping_ui photoscoping_shaders)
 target_include_directories(photoscoping_ui PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")

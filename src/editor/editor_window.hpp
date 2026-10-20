@@ -2,6 +2,7 @@
 
 #include "editor/inspector.hpp"
 #include "editor/timeline.hpp"
+#include "editor/viewer.hpp"
 #include "gpu/icon_atlas.hpp"
 #include "ui/font.hpp"
 #include "ui/node.hpp"
@@ -25,6 +26,7 @@ public:
                const gpu::IconAtlas& small_icons);
 
     Inspector* inspector() const { return inspector_; }
+    Viewer* viewer() const { return viewer_; }
     Timeline* timeline() const { return timeline_; }
 
     // In logical pixels, as of the last layout. The footage and the nebula are
@@ -46,6 +48,7 @@ protected:
 private:
     void refresh_splitter_look();
 
+    Viewer* viewer_ = nullptr;
     Inspector* inspector_ = nullptr;
     Timeline* timeline_ = nullptr;
     ui::Node* splitter_ = nullptr;
