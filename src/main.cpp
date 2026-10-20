@@ -1,4 +1,5 @@
 #include <SDL3/SDL.h>
+#include <SDL3_image/SDL_image.h>
 
 #include <cmath>
 #include <cstdio>
@@ -10,6 +11,8 @@
 
 #include "app/editor_app.hpp"
 #include "color/cube_lut.hpp"
+#include "fixes/fixes.hpp"
+#include "fixes/rematte.hpp"
 #include "gpu/gpu_context.hpp"
 #include "gpu/ingest_pass.hpp"
 #include "matting/matte_model.hpp"
@@ -31,6 +34,7 @@ struct Options {
     bool software = false;
     std::string matte;
     std::string matte_clip;
+    std::string rematte_clip;
     std::string matte_stage = "subject";
     std::string models = "models";
     bool model_cpu = false;
@@ -63,6 +67,10 @@ void usage() {
         "                 matte every frame of the clip with the native stack, each\n"
         "                 as a 16-bit PNG in DIR/<clip>_mattes/ the moment it is done;\n"
         "                 frames already there are skipped, so a stopped run resumes\n"
+        "  --rematte-clip DIR\n"
+        "                 make every patch the re-matte boxes in DIR/<clip>_fixes.json\n"
+        "                 want, as 16-bit PNGs in DIR/<clip>_rematte/; patches already\n"
+        "                 there are skipped\n"
         "  --models DIR   where tools/export_matting_model.py wrote the models\n"
         "                 (default: models)\n"
         "  --model-cpu    run the models on the CPU, not Core ML\n"
@@ -112,6 +120,10 @@ std::optional<Options> parse_args(int argc, char** argv) {
             const char* v = value();
             if (!v) return std::nullopt;
             o.matte_clip = v;
+        } else if (a == "--rematte-clip") {
+            const char* v = value();
+            if (!v) return std::nullopt;
+            o.rematte_clip = v;
         } else if (a == "--matte-stage") {
             const char* v = value();
             const std::string stage = v ? v : "";
@@ -150,7 +162,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
         }
     }
     if (!o.export_path.empty()) o.probe = true;
-    if ((o.probe || o.bench || o.pipe || !o.matte.empty() || !o.matte_clip.empty()) &&
+    if ((o.probe || o.bench || o.pipe || !o.matte.empty() || !o.matte_clip.empty() ||
+         !o.rematte_clip.empty()) &&
         o.clip.empty())
         return std::nullopt;
     return o;
@@ -419,6 +432,134 @@ bool run_matte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestP
     return done >= total;
 }
 
+// The patches the clip's re-matte boxes want, as the app's re-matte job:
+// each frame read, its matte found -- the run's PNG if there is one, the
+// coarse model's otherwise -- and each box on it looked at again
+// (MattingStack::closer), the box's part written as a 16-bit PNG named for
+// the frame and the box. A patch already there is skipped, so a stopped run
+// resumes and a box moved on some frames is re-matted only on those.
+bool run_rematte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestPass& ingest,
+                      ps::media::VideoDecoder& decoder, const ps::gpu::InputTransform& transform) {
+    namespace fs = std::filesystem;
+    const std::string stem = fs::path(o.clip).stem().string();
+    const fs::path dir(o.rematte_clip);
+    const fs::path out = dir / (stem + "_rematte");
+    const fs::path mattes = dir / (stem + "_mattes");
+    std::error_code ec;
+    fs::create_directories(out, ec);
+
+    ps::fixes::Fixes fixes;
+    std::string error;
+    if (!fixes.load((dir / (stem + "_fixes.json")).string(), &error)) {
+        std::fprintf(stderr, "cannot read the fixes: %s\n", error.c_str());
+        return false;
+    }
+    const int fw = decoder.width(), fh = decoder.height();
+    std::vector<ps::fixes::PatchJob> jobs;
+    for (const ps::fixes::PatchJob& j : ps::fixes::rematte_jobs(fixes, decoder.frame_count(), fw, fh))
+        if (!fs::exists(out / ps::fixes::patch_name(j.frame, j.box), ec)) jobs.push_back(j);
+    std::printf("%s: %zu patches to make\n", o.clip.c_str(), jobs.size());
+    std::fflush(stdout);
+    if (jobs.empty()) return true;
+
+    const Uint64 load_start = SDL_GetTicksNS();
+    ps::matting::MattingStack stack;
+    const auto backend =
+        o.model_cpu ? ps::matting::MatteModel::Backend::kCpu : ps::matting::MatteModel::Backend::kGpu;
+    if (!stack.load(o.models, backend, ps::matting::default_cache_dir(), &error)) {
+        std::fprintf(stderr, "cannot load the models in %s: %s\n", o.models.c_str(), error.c_str());
+        return false;
+    }
+    std::printf("models loaded in %.0f s\n", (SDL_GetTicksNS() - load_start) / 1e9);
+    std::fflush(stdout);
+
+    const Uint64 started = SDL_GetTicksNS();
+    std::int64_t at = -1;  // the frame the decoder holds
+    std::size_t made = 0;
+    for (std::size_t n = 0; n < jobs.size();) {
+        const std::int64_t frame_index = jobs[n].frame;
+        const Uint64 t = SDL_GetTicksNS();
+        // The next frame is read on; any other is sought.
+        const bool decoded = frame_index == at + 1 && at >= 0 ? decoder.read_next()
+                                                              : decoder.seek_frame(frame_index);
+        if (!decoded) {
+            std::fprintf(stderr, "cannot decode frame %lld\n", static_cast<long long>(frame_index));
+            return false;
+        }
+        at = frame_index;
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
+        const bool ingested = ingest.process(cmd, decoder, transform);
+        SDL_SubmitGPUCommandBuffer(cmd);
+        if (!ingested) return false;
+        const ps::matting::MattingFrame frame = ps::matting::prepare_frame(
+            ingest.read_working(), static_cast<int>(ingest.width()),
+            static_cast<int>(ingest.height()));
+
+        // The matte the patch is to sit in: the one on disk, which is what
+        // the viewer blends it over, or failing that the coarse model's.
+        std::vector<float> base;
+        char name[16];
+        std::snprintf(name, sizeof name, "%06lld.png", static_cast<long long>(frame_index));
+        if (SDL_Surface* file = IMG_Load((mattes / name).string().c_str())) {
+            SDL_Surface* rgba = SDL_ConvertSurface(file, SDL_PIXELFORMAT_ABGR8888);
+            SDL_DestroySurface(file);
+            if (rgba && rgba->w == frame.width && rgba->h == frame.height) {
+                base.resize(static_cast<std::size_t>(frame.width) * frame.height);
+                for (int y = 0; y < frame.height; ++y) {
+                    const auto* row = static_cast<const std::uint8_t*>(rgba->pixels) + y * rgba->pitch;
+                    for (int x = 0; x < frame.width; ++x)
+                        base[static_cast<std::size_t>(y) * frame.width + x] = row[x * 4] / 255.0f;
+                }
+            }
+            if (rgba) SDL_DestroySurface(rgba);
+        }
+        if (base.empty()) base = stack.coarse(frame, &error);
+        if (base.empty()) {
+            std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(frame_index), error.c_str());
+            return false;
+        }
+
+        for (; n < jobs.size() && jobs[n].frame == frame_index; ++n) {
+            const ps::fixes::PixelRect& box = jobs[n].box;
+            const ps::fixes::RematteCrop c = ps::fixes::rematte_crop(box, frame.width, frame.height);
+            const std::vector<float> alpha =
+                stack.closer(frame, base, c.crop.x0, c.crop.y0, c.crop.width(), c.crop.height(),
+                             c.wide, &error);
+            if (alpha.empty()) {
+                std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(frame_index),
+                             error.c_str());
+                return false;
+            }
+            std::vector<float> patch(static_cast<std::size_t>(box.width()) * box.height());
+            for (int y = 0; y < box.height(); ++y)
+                for (int x = 0; x < box.width(); ++x)
+                    patch[static_cast<std::size_t>(y) * box.width() + x] =
+                        alpha[static_cast<std::size_t>(box.y0 - c.crop.y0 + y) * c.crop.width() +
+                              (box.x0 - c.crop.x0 + x)];
+            const fs::path final_path = out / ps::fixes::patch_name(frame_index, box);
+            fs::path partial = final_path;
+            partial.replace_extension(".partial.png");
+            if (!ps::matting::write_png16(partial.string(), patch, box.width(), box.height())) {
+                std::fprintf(stderr, "cannot write %s\n", partial.c_str());
+                return false;
+            }
+            fs::rename(partial, final_path, ec);
+            if (ec) {
+                std::fprintf(stderr, "cannot rename %s: %s\n", partial.c_str(), ec.message().c_str());
+                return false;
+            }
+            ++made;
+            const double per = (SDL_GetTicksNS() - started) / 1e9 / static_cast<double>(made);
+            std::printf("  %zu/%zu  frame %lld  %dx%d at %.1fx  %.2f s  eta %.1f min\n", made,
+                        jobs.size(), static_cast<long long>(frame_index), box.width(), box.height(),
+                        c.detail, (SDL_GetTicksNS() - t) / 1e9,
+                        per * static_cast<double>(jobs.size() - made) / 60.0);
+            std::fflush(stdout);
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -454,7 +595,7 @@ int main(int argc, char** argv) {
     // a worker thread, the same way it opens one dropped on it later.
     const bool headless =
         options->probe || options->bench || options->pipe || !options->matte.empty() ||
-        !options->matte_clip.empty();
+        !options->matte_clip.empty() || !options->rematte_clip.empty();
     ps::media::VideoDecoder decoder;
     if (headless) {
         if (!decoder.open(options->clip, !options->software)) return 1;
@@ -473,8 +614,7 @@ int main(int argc, char** argv) {
     ps::gpu::GpuContext gpu;
     if (!gpu.create("photoscoping", options->window_w, options->window_h,
                     ps::gpu::ColorMode::kEDR,
-                    /*visible=*/!options->probe && !options->bench && !options->pipe &&
-                        options->screenshot.empty())) {
+                    /*visible=*/!headless && options->screenshot.empty())) {
         SDL_Quit();
         return 1;
     }
@@ -498,6 +638,14 @@ int main(int argc, char** argv) {
 
     if (!options->matte_clip.empty()) {
         const int status = run_matte_clip(*options, gpu, ingest, decoder, transform) ? 0 : 1;
+        ingest.destroy();
+        gpu.destroy();
+        SDL_Quit();
+        return status;
+    }
+
+    if (!options->rematte_clip.empty()) {
+        const int status = run_rematte_clip(*options, gpu, ingest, decoder, transform) ? 0 : 1;
         ingest.destroy();
         gpu.destroy();
         SDL_Quit();

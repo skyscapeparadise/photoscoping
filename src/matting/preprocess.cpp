@@ -73,6 +73,24 @@ MattingFrame prepare_frame(const std::vector<float>& rgba, int width, int height
     return frame;
 }
 
+MattingFrame crop_frame(const MattingFrame& frame, int x, int y, int w, int h) {
+    MattingFrame out;
+    out.width = w;
+    out.height = h;
+    const std::size_t pixels = static_cast<std::size_t>(w) * h;
+    const std::size_t source = static_cast<std::size_t>(frame.width) * frame.height;
+    out.planes.resize(pixels * 3);
+    out.linear.resize(pixels * 3);
+    for (int c = 0; c < 3; ++c)
+        for (int row = 0; row < h; ++row) {
+            const std::size_t s = c * source + static_cast<std::size_t>(y + row) * frame.width + x;
+            const std::size_t d = c * pixels + static_cast<std::size_t>(row) * w;
+            std::copy_n(&frame.planes[s], w, &out.planes[d]);
+            std::copy_n(&frame.linear[s], w, &out.linear[d]);
+        }
+    return out;
+}
+
 std::vector<float> model_input(const MattingFrame& frame, int out_w, int out_h) {
     // Separable bicubic: across, then down. PyTorch clamps the result to
     // 0..1 after both, which matting_bakeoff.py does too.

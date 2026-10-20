@@ -23,6 +23,8 @@ public:
 
     // The footage's size in pixels; zero for none.
     void set_image_size(int width, int height);
+    int image_width() const { return image_w_; }
+    int image_height() const { return image_h_; }
     // Whether drags pan: the navigate tool is in hand.
     void set_navigating(bool navigating);
     // Space is held: drags pan whatever the tool.

@@ -11,6 +11,10 @@
 // subject already multiplied by it, over black. `fixes` is what the hand-made
 // fixes do to the matte (fixes/mask.hpp): red, what the garbage mattes leave;
 // green and blue, the paint strokes folded into alpha -> green * alpha + blue.
+// `rematte` is the re-matte patches on this frame (fixes/rematte.hpp), over
+// the rectangle `rematte_rect` of the image: red the closer look's alpha,
+// green how much of it to take. They replace the matte before the fixes
+// apply, so a garbage matte or a stroke still has the last word.
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
@@ -19,6 +23,7 @@ layout(set = 2, binding = 0) uniform sampler2D working;
 layout(set = 2, binding = 1) uniform sampler2D matte;
 layout(set = 2, binding = 2) uniform sampler2D subject;
 layout(set = 2, binding = 3) uniform sampler2D fixes;
+layout(set = 2, binding = 4) uniform sampler2D rematte;
 
 // Must match ps::gpu::DisplayView.
 const int kViewFootage = 0;
@@ -41,6 +46,10 @@ layout(set = 3, binding = 0) uniform Display {
     float checker_px;
     // 1 when there are fixes to apply.
     float has_fixes;
+    // The patches' rectangle in the image's UV: x0, y0, x1, y1.
+    vec4 rematte_rect;
+    // 1 when there are patches on this frame.
+    float has_rematte;
 } display;
 
 vec3 to_display(vec3 c) {
@@ -55,7 +64,14 @@ void main() {
         rgb = to_display(texture(working, v_uv).rgb);
     } else {
         vec4 f = display.has_fixes > 0.5 ? texture(fixes, v_uv) : vec4(1.0, 1.0, 0.0, 1.0);
-        float a = (clamp(texture(matte, v_uv).r, 0.0, 1.0) * f.g + f.b) * f.r;
+        float m = clamp(texture(matte, v_uv).r, 0.0, 1.0);
+        vec4 r = display.rematte_rect;
+        if (display.has_rematte > 0.5 && all(greaterThanEqual(v_uv, r.xy)) &&
+            all(lessThan(v_uv, r.zw))) {
+            vec2 p = texture(rematte, (v_uv - r.xy) / (r.zw - r.xy)).rg;
+            m = mix(m, p.r, p.g);
+        }
+        float a = (m * f.g + f.b) * f.r;
         if (view == kViewMatte) {
             // As a matte reads in any player: its values shown as encoded
             // greys, so 0.5 coverage is a middle grey rather than a dark one.

@@ -122,6 +122,7 @@ editor::ClipInfo clip_info(const std::string& name, const media::VideoDecoder& d
     info.rows.emplace_back("input", lut_path.empty() ? "file tags" : stem_of(lut_path));
     // Filled in from what has been matted.
     info.rows.emplace_back("matte", "none");
+    info.rows.emplace_back("re-matte", "none");
     return info;
 }
 
@@ -160,6 +161,16 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options op
     paint->on_edit_begin = [this] { history_.record(fixes_); };
     paint->on_live_change = [this] { fixes_changed(/*save=*/false); };
     paint->on_changed = [this] { fixes_changed(/*save=*/true); };
+    editor::RematteTool* rematte = root_.rematte_tool();
+    rematte->on_edit_begin = [this] { history_.record(fixes_); };
+    rematte->on_live_change = [this] { fixes_changed(/*save=*/false); };
+    rematte->on_changed = [this] { fixes_changed(/*save=*/true); };
+    rematte->is_made = [this](std::int64_t frame, const fixes::PixelRect& box) {
+        return patches_.made(frame, box);
+    };
+    // The pill under the inspector is the matting run's, or the re-matte's
+    // with that tool in hand.
+    root_.on_tool_changed = [this](editor::Tool) { refresh_matte_ui(); };
     root_.inspector()->views()->on_view_changed = [this](editor::View view) { view_ = view; };
     root_.inspector()->on_action = [this] { toggle_job(); };
     job_.locate();
@@ -184,7 +195,8 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options op
     for (FrameSource* source : {static_cast<FrameSource*>(&clip_),
                                 static_cast<FrameSource*>(&matte_),
                                 static_cast<FrameSource*>(&subject_),
-                                static_cast<FrameSource*>(&frames_)}) {
+                                static_cast<FrameSource*>(&frames_),
+                                static_cast<FrameSource*>(&patches_)}) {
         source->set_notify([frame_event] {
             SDL_Event event = {};
             event.type = frame_event;
@@ -214,6 +226,7 @@ void EditorApp::destroy() {
     job_.stop();
     clip_.close();
     frames_.destroy();
+    patches_.destroy();
     matte_.destroy();
     subject_.destroy();
     mask_.destroy();
@@ -243,6 +256,7 @@ bool EditorApp::open_clip(const std::string& path, std::int64_t frame) {
     matte_.destroy();
     subject_.destroy();
     frames_.destroy();
+    patches_.destroy();
     if (!clip_.open(path, !options_.software_decode, ingest_)) {
         SDL_Log("cannot open %s", path.c_str());
         refresh_matte_ui();
@@ -260,8 +274,9 @@ bool EditorApp::open_clip(const std::string& path, std::int64_t frame) {
     root_.viewer()->set_image_size(clip_.decoder().width(), clip_.decoder().height());
 
     frames_.open(gpu_->device(), render_path("_mattes"), clip_.frame_count());
+    patches_.open(gpu_->device(), render_path("_rematte"), clip_.decoder().width(),
+                  clip_.decoder().height(), clip_.frame_count());
     choose_matte_source();
-    refresh_matte_ui();
 
     std::string error;
     if (!fixes_.load(render_path("_fixes.json"), &error))
@@ -269,7 +284,9 @@ bool EditorApp::open_clip(const std::string& path, std::int64_t frame) {
                 render_path("_fixes.json").c_str(), error.c_str());
     fixes_readable_ = error.empty();
     history_.clear();
+    patches_.set_fixes(fixes_);
     fixes_changed(/*save=*/false);
+    refresh_matte_ui();
     SDL_Log("opened %s", path.c_str());
     return true;
 }
@@ -415,8 +432,39 @@ void EditorApp::refresh_matte_ui() {
     }
     inspector->set_row("matte", row);
 
-    if (!clip_.is_open() || !job_.available())
+    const bool rematting = job_.running() && job_.kind() == MatteJob::Kind::kRematte;
+    const std::size_t wanted = patches_.wanted(), made = patches_.made_count();
+    std::string rematte_row = "none";
+    if (rematting) {
+        rematte_row = std::to_string(made) + " of " + std::to_string(wanted);
+        const double elapsed = (SDL_GetTicksNS() - job_started_ns_) / 1e9;
+        const std::size_t since = made - std::min(made, made_at_start_);
+        if (since > 0)
+            rematte_row += " \xC2\xB7 " + time_left((wanted - made) * elapsed / since);
+        else
+            rematte_row = "loading the model";
+    } else if (wanted > 0) {
+        rematte_row = made >= wanted ? std::to_string(made) + (made == 1 ? " patch" : " patches")
+                                     : std::to_string(made) + " of " + std::to_string(wanted);
+    }
+    inspector->set_row("re-matte", rematte_row);
+
+    const std::size_t to_make = patches_.frames_to_make();
+    if (root_.tool() == editor::Tool::kRematte && !(job_.running() && !rematting)) {
+        if (!clip_.is_open() || !job_.available())
+            inspector->set_action("re-matte", false);
+        else if (rematting)
+            inspector->set_action("stop re-matting", true);
+        else if (to_make > 0)
+            inspector->set_action("re-matte " + std::to_string(to_make) +
+                                      (to_make == 1 ? " frame" : " frames"),
+                                  true);
+        else
+            inspector->set_action(wanted > 0 ? "re-matted" : "draw a box", false);
+    } else if (!clip_.is_open() || !job_.available())
         inspector->set_action("matte clip", false);
+    else if (rematting)
+        inspector->set_action("stop re-matting", true);
     else if (job_.running())
         inspector->set_action("stop matting", true);
     else if (done > 0 && !complete)
@@ -430,17 +478,25 @@ void EditorApp::refresh_matte_ui() {
 void EditorApp::toggle_job() {
     if (job_.running()) {
         job_.stop();
+    } else if (clip_.is_open() && root_.tool() == editor::Tool::kRematte) {
+        if (job_.start(MatteJob::Kind::kRematte, clip_.path(), options_.lut_path,
+                       options_.render_dir, clip_name_)) {
+            job_started_ns_ = SDL_GetTicksNS();
+            made_at_start_ = patches_.made_count();
+        }
     } else if (clip_.is_open()) {
         // The videos are about to be replaced, and the PNGs are what will
         // be current, so stop reading the old ones now.
         matte_.destroy();
         subject_.destroy();
-        if (job_.start(clip_.path(), options_.lut_path, options_.render_dir, clip_name_)) {
+        if (job_.start(MatteJob::Kind::kMatte, clip_.path(), options_.lut_path,
+                       options_.render_dir, clip_name_)) {
             job_started_ns_ = SDL_GetTicksNS();
             done_at_start_ = frames_.done_count();
         }
     }
     frames_.rescan();
+    patches_.rescan();
     choose_matte_source();
     refresh_matte_ui();
 }
@@ -452,11 +508,17 @@ void EditorApp::poll_job() {
     last_poll_ns_ = now;
     // A matte that has just landed for the frame on screen is fetched, not
     // left waiting for the next time the frame changes.
-    if (frames_.rescan() && frames_.matted(shown_) && frames_.shown() != shown_) frames_.refresh();
+    // Patches the same way: a rescan that finds new ones refreshes the frame
+    // on screen if they are its.
+    const bool rematting = job_.kind() == MatteJob::Kind::kRematte;
+    if (rematting) patches_.rescan();
+    else if (frames_.rescan() && frames_.matted(shown_) && frames_.shown() != shown_) frames_.refresh();
     bool succeeded = false;
     if (job_.poll_finished(&succeeded)) {
+        if (rematting) patches_.rescan();
         if (!succeeded)
-            SDL_Log("the matting stopped short; see %s", render_path("_matte.log").c_str());
+            SDL_Log("the %s stopped short; see %s", rematting ? "re-matte" : "matting",
+                    render_path(rematting ? "_rematte.log" : "_matte.log").c_str());
         // Finished, the new videos are in place and newer than the frames.
         choose_matte_source();
     }
@@ -467,6 +529,9 @@ void EditorApp::fixes_changed(bool save) {
     ++fixes_version_;
     root_.timeline()->set_keys(fixes_.key_frames());
     if (!save || !clip_.is_open()) return;
+    // Which patches the boxes want; a moved box wants new ones.
+    patches_.set_fixes(fixes_);
+    refresh_matte_ui();
     // A file that would not read is never written over: whatever is in it
     // may be the only copy of someone's work.
     if (!fixes_readable_) return;
@@ -529,6 +594,7 @@ void EditorApp::handle(const SDL_Event& event) {
             const std::int64_t at = std::max<std::int64_t>(shown_, 0);
             if (root_.garbage_tool()->handle_key(event.key.key, event.key.mod)) break;
             if (root_.paint_tool()->handle_key(event.key.key, event.key.mod)) break;
+            if (root_.rematte_tool()->handle_key(event.key.key, event.key.mod)) break;
             if ((event.key.mod & (SDL_KMOD_GUI | SDL_KMOD_CTRL)) != 0 && event.key.key == SDLK_Z) {
                 undo(/*redo=*/(event.key.mod & SDL_KMOD_SHIFT) != 0);
                 break;
@@ -629,7 +695,7 @@ void EditorApp::advance(SDL_GPUCommandBuffer* cmd) {
     }
 
     // Everything the view reads, asked for the same frame.
-    FrameSource* needed[4];
+    FrameSource* needed[5];
     int count = 0;
     needed[count++] = &clip_;
     if (view_ != editor::View::kFootage) {
@@ -639,6 +705,7 @@ void EditorApp::advance(SDL_GPUCommandBuffer* cmd) {
         } else if (source_ == MatteSource::kFrames && frames_.matted(target_)) {
             needed[count++] = &frames_;
         }
+        if (source_ != MatteSource::kNone && patches_.wants(target_)) needed[count++] = &patches_;
     }
 
     const std::int64_t next = playing_ ? target_ + 1 : -1;
@@ -681,6 +748,7 @@ void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, 
     root_.viewer()->set_device_scale(scale);
     root_.garbage_tool()->set_frame(std::max<std::int64_t>(shown_, 0));
     root_.paint_tool()->set_frame(std::max<std::int64_t>(shown_, 0));
+    root_.rematte_tool()->set_frame(std::max<std::int64_t>(shown_, 0));
     root_.layout(static_cast<float>(lw), static_cast<float>(lh));
     input_.update(root_);
     animating_ = root_.tick(dt);
@@ -701,8 +769,6 @@ void EditorApp::composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale) {
         frame.working = ingest_->working();
         frame.width = ingest_->width();
         frame.height = ingest_->height();
-        // Only renders of the frame on screen: one still catching up after a
-        // change of view is left out, and the footage shows alone meanwhile.
         // The fixes' mask, made again only when they or the frame have
         // changed, and only for a view that uses the matte. None live on
         // this frame -- strokes come and go -- is no mask at all.
@@ -718,11 +784,17 @@ void EditorApp::composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale) {
             }
             if (mask_live_) frame.fixes = mask_.texture();
         }
+        // Only renders of the frame on screen: one still catching up after a
+        // change of view is left out, and the footage shows alone meanwhile.
         if (source_ == MatteSource::kFrames && frames_.shown() == shown_) {
             frame.matte = frames_.texture();
         } else if (source_ == MatteSource::kVideos) {
             if (matte_.shown() == shown_) frame.matte = matte_.working();
             if (subject_.shown() == shown_) frame.subject = subject_.working();
+        }
+        if (patches_.shown() == shown_ && patches_.texture()) {
+            frame.rematte = patches_.texture();
+            patches_.rect_uv(frame.rematte_rect);
         }
         switch (view_) {
             case editor::View::kFootage: view = gpu::DisplayView::kFootage; break;
@@ -852,6 +924,7 @@ bool EditorApp::screenshot(const char* path) {
             } else if (source_ == MatteSource::kFrames && frames_.matted(target_)) {
                 frames_.wait(target_);
             }
+            if (source_ != MatteSource::kNone && patches_.wants(target_)) patches_.wait(target_);
         }
     }
 

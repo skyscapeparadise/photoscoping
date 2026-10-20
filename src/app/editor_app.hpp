@@ -11,6 +11,7 @@
 #include "app/mask_texture.hpp"
 #include "app/matte_frames.hpp"
 #include "app/matte_job.hpp"
+#include "app/rematte_patches.hpp"
 #include "color/cube_lut.hpp"
 #include "editor/editor_window.hpp"
 #include "editor/inspector.hpp"
@@ -139,6 +140,8 @@ private:
     LockstepStream subject_;
     MatteFrames frames_;
     MatteJob job_;
+    // The re-matte boxes' patches, made by the job run the other way.
+    RemattePatches patches_;
     MatteSource source_ = MatteSource::kNone;
 
     // The hand-made fixes for the open clip, kept beside its renders.
@@ -156,6 +159,7 @@ private:
     bool fixes_readable_ = true;
     Uint64 job_started_ns_ = 0;
     std::int64_t done_at_start_ = 0;
+    std::size_t made_at_start_ = 0;
     Uint64 last_poll_ns_ = 0;
     editor::View view_ = editor::View::kFootage;
 

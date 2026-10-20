@@ -70,6 +70,23 @@ it stands, carrying it further; Backspace and Shift-Backspace delete as with
 shapes. Strokes apply in the order they were painted, and inside the garbage
 mattes.
 
+The re-matte tool draws boxes the matting stack looks at again, closer. Drag
+on the footage to draw one; drag inside it to move it, or an edge or corner
+to resize it. Like a stroke, a box is live only from its first key to its
+last: K keys the selected box on this frame, and Backspace and
+Shift-Backspace delete. A box drawn lilac is waiting; the pill under the
+inspector re-mattes every frame that has one, in the background, and each
+turns white as it is done. The card says how much closer the selected box
+looks -- its crop is magnified to fill the model, up to four times.
+
+Re-matting crops around the box, runs the model on the crop, trusts that
+closer look only where the edge is soft (as the tiled stage does), refines it
+with closed-form matting, and writes the box as a 16-bit PNG in
+`renders/<clip>_rematte/`, named for its frame and the box to the pixel. The
+viewer blends it into the matte, feathered in from the box's edge, before
+garbage mattes and paint apply. Moving a box only re-mattes the frames it
+moved on. `--rematte-clip DIR` runs it headless.
+
 The viewer shows a matte four ways: the footage, the matte, the matted subject
 over a checkerboard, or the footage washed purple wherever the matte drops it.
 The pills under the inspector switch between them, as do the keys 1-4, and a

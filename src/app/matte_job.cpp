@@ -44,13 +44,15 @@ void MatteJob::locate() {
     }
 }
 
-bool MatteJob::start(const std::string& clip, const std::string& lut, const std::string& out,
+bool MatteJob::start(Kind kind, const std::string& clip, const std::string& lut, const std::string& out,
                      const std::string& name) {
     if (!available() || running()) return false;
     std::error_code ec;
     fs::create_directories(out, ec);
 
-    std::vector<std::string> args = {app_, clip, "--matte-clip", out, "--models", models_};
+    const bool rematte = kind == Kind::kRematte;
+    std::vector<std::string> args = {app_, clip, rematte ? "--rematte-clip" : "--matte-clip", out,
+                                     "--models", models_};
     if (!lut.empty()) {
         args.push_back("--lut");
         args.push_back(lut);
@@ -61,7 +63,7 @@ bool MatteJob::start(const std::string& clip, const std::string& lut, const std:
 
     // Everything the run says goes to a log beside its output rather than
     // into this process's terminal, where it would interleave with ours.
-    const std::string log_path = (fs::path(out) / (name + "_matte.log")).string();
+    const std::string log_path = (fs::path(out) / (name + (rematte ? "_rematte.log" : "_matte.log"))).string();
     log_ = SDL_IOFromFile(log_path.c_str(), "w");
 
     // Our environment, less Metal's validation layer. SDL switches that on
@@ -90,7 +92,9 @@ bool MatteJob::start(const std::string& clip, const std::string& lut, const std:
         log_ = nullptr;
         return false;
     }
-    SDL_Log("matting %s into %s (log: %s)", clip.c_str(), out.c_str(), log_path.c_str());
+    kind_ = kind;
+    SDL_Log("%s %s into %s (log: %s)", rematte ? "re-matting" : "matting", clip.c_str(),
+            out.c_str(), log_path.c_str());
     return true;
 }
 

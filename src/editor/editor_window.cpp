@@ -44,6 +44,11 @@ void EditorWindow::build(ui::FontCache& fonts, const gpu::IconAtlas& large_icons
     paint_ = viewer_->add<PaintTool>();
     paint_->attach(viewer_, fixes);
     paint_->on_brush_changed = [this] { inspector_->set_heading(paint_->heading()); };
+    rematte_ = viewer_->add<RematteTool>();
+    rematte_->attach(viewer_, fixes);
+    rematte_->on_heading_changed = [this] {
+        if (rematte_->active()) inspector_->set_heading(rematte_->heading());
+    };
 
     inspector_ = add<Inspector>();
     inspector_->build(fonts, large_icons);
@@ -51,7 +56,10 @@ void EditorWindow::build(ui::FontCache& fonts, const gpu::IconAtlas& large_icons
         viewer_->set_navigating(tool == Tool::kNavigate);
         garbage_->set_active(tool == Tool::kGarbage);
         paint_->set_active(tool == Tool::kPaint);
+        rematte_->set_active(tool == Tool::kRematte);
         if (tool == Tool::kPaint) inspector_->set_heading(paint_->heading());
+        if (tool == Tool::kRematte) inspector_->set_heading(rematte_->heading());
+        if (on_tool_changed) on_tool_changed(tool);
     };
     inspector_->tools()->on_preview = [this] { toggle_panel(); };
 

@@ -44,6 +44,11 @@ struct Track {
     std::size_t point_count() const { return keys.empty() ? 0 : keys.front().points.size(); }
     std::int64_t first_frame() const { return keys.front().frame; }
     std::int64_t last_frame() const { return keys.back().frame; }
+    // From the first key to the last: where a fix that does not hold past
+    // its ends is there at all.
+    bool live_at(std::int64_t frame) const {
+        return !keys.empty() && frame >= first_frame() && frame <= last_frame();
+    }
 };
 
 // A garbage matte: a closed polygon the subject is always inside. Outside
@@ -63,16 +68,24 @@ struct Stroke : Track {
     float radius = 20.0f;  // image pixels
     // Edge softness: the outer part of the radius that fades, 0..1.
     float softness = 0.5f;
+};
 
-    bool live_at(std::int64_t frame) const {
-        return !keys.empty() && frame >= first_frame() && frame <= last_frame();
-    }
+// A local re-matte: a box the stack looks at again, closer, on every frame
+// from its first key to its last. Two points, the box's opposite corners,
+// in either order. What the closer look makes is kept beside the renders
+// (fixes/rematte.hpp) and blended over the matte inside the box.
+//
+// Every key's corners are kept smaller first -- top left, then bottom right --
+// so they tween corner to corner; set() takes them that way.
+struct Rematte : Track {
+    void normalize();
 };
 
 struct Fixes {
     std::vector<Garbage> garbage;
     // In the order they were painted, which is the order they apply in.
     std::vector<Stroke> strokes;
+    std::vector<Rematte> rematte;
     int next_id = 1;
 
     Garbage* find(int id);
@@ -85,7 +98,12 @@ struct Fixes {
     // A new stroke with one key, at `frame`. Returns its id.
     int add_stroke(std::int64_t frame, PaintMode mode, float radius, std::vector<Point> points);
     bool remove_stroke(int id);
-    bool empty() const { return garbage.empty() && strokes.empty(); }
+    Rematte* find_rematte(int id);
+    const Rematte* find_rematte(int id) const;
+    // A new box with one key, at `frame`. Returns its id.
+    int add_rematte(std::int64_t frame, Point a, Point b);
+    bool remove_rematte(int id);
+    bool empty() const { return garbage.empty() && strokes.empty() && rematte.empty(); }
     // Every frame any fix has a key on, ascending, once each.
     std::vector<std::int64_t> key_frames() const;
 

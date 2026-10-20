@@ -105,6 +105,7 @@ target_include_directories(photoscoping_color PUBLIC src)
 add_library(photoscoping_fixes STATIC
     src/fixes/fixes.cpp
     src/fixes/mask.cpp
+    src/fixes/rematte.cpp
 )
 target_include_directories(photoscoping_fixes PUBLIC src "${CMAKE_CURRENT_SOURCE_DIR}/vendor/json")
 
@@ -190,6 +191,7 @@ add_library(photoscoping_ui STATIC
     src/editor/lines.cpp
     src/editor/garbage_tool.cpp
     src/editor/paint_tool.cpp
+    src/editor/rematte_tool.cpp
 )
 add_dependencies(photoscoping_ui photoscoping_shaders)
 target_include_directories(photoscoping_ui PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -204,7 +206,8 @@ target_link_libraries(photoscoping_ui PUBLIC
 
 add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep_stream.cpp
                             src/app/matte_frames.cpp src/app/matte_job.cpp
-                            src/app/clip_frames.cpp src/app/mask_texture.cpp)
+                            src/app/clip_frames.cpp src/app/mask_texture.cpp
+                            src/app/rematte_patches.cpp)
 target_link_libraries(photoscoping PRIVATE photoscoping_ui photoscoping_matting photoscoping_fixes)
 
 if(APPLE)

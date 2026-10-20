@@ -36,6 +36,10 @@ public:
         SDL_GPUTexture* subject = nullptr;
         // What the fixes do to the matte (fixes/mask.hpp); null when none.
         SDL_GPUTexture* fixes = nullptr;
+        // The re-matte patches on this frame (fixes/rematte.hpp), and the
+        // part of the image they cover in UV: x0, y0, x1, y1. Null when none.
+        SDL_GPUTexture* rematte = nullptr;
+        float rematte_rect[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     };
 
     // Records a pass that clears `target` to `background` (linear nits,

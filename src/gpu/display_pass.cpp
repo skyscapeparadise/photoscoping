@@ -20,6 +20,9 @@ struct DisplayUniform {
     float view;
     float checker_px;
     float has_fixes;
+    float rematte_rect[4];
+    float has_rematte;
+    float pad[3];
 };
 
 // The overlay's wash: the nebula's plum, linear Rec.709, over most of what
@@ -33,7 +36,7 @@ DisplayPass::~DisplayPass() { destroy(); }
 
 bool DisplayPass::create(const GpuContext& gpu) {
     device_ = gpu.device();
-    pipeline_ = create_quad_pipeline(device_, shaders::kDisplayFragment, 4, gpu.linear_format());
+    pipeline_ = create_quad_pipeline(device_, shaders::kDisplayFragment, 5, gpu.linear_format());
     // Linear filtering for now; an 8K frame in a small viewer aliases, which
     // a mip chain or a proper downscale will fix when the viewer gets one.
     sampler_ = create_sampler(device_, SDL_GPU_FILTER_LINEAR);
@@ -86,6 +89,8 @@ void DisplayPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const 
         u.view = static_cast<float>(view);
         u.checker_px = kCheckerLogical * scale;
         u.has_fixes = frame.fixes ? 1.0f : 0.0f;
+        u.has_rematte = frame.rematte ? 1.0f : 0.0f;
+        for (int i = 0; i < 4; ++i) u.rematte_rect[i] = frame.rematte_rect[i];
 
         SDL_BindGPUGraphicsPipeline(pass, pipeline_);
         // Every declared sampler must be bound; a texture a view does not
@@ -93,13 +98,14 @@ void DisplayPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const 
         SDL_GPUSampler* sampler = nearest ? nearest_ : sampler_;
         // The fixes are always filtered: they are half the frame's
         // resolution, and their edges are meant to be soft.
-        const SDL_GPUTextureSamplerBinding bindings[4] = {
+        const SDL_GPUTextureSamplerBinding bindings[5] = {
             {frame.working, sampler},
             {frame.matte ? frame.matte : frame.working, sampler},
             {frame.subject ? frame.subject : frame.working, sampler},
             {frame.fixes ? frame.fixes : frame.working, sampler_},
+            {frame.rematte ? frame.rematte : frame.working, sampler},
         };
-        SDL_BindGPUFragmentSamplers(pass, 0, bindings, 4);
+        SDL_BindGPUFragmentSamplers(pass, 0, bindings, 5);
         SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof u);
         draw_quad(cmd, pass, QuadRect{{x0, y_bottom, x1, y_top}});
     }

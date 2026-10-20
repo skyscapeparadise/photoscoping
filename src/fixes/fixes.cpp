@@ -122,6 +122,44 @@ bool Fixes::remove_stroke(int id) {
     return strokes.size() != before;
 }
 
+void Rematte::normalize() {
+    for (ShapeKey& k : keys) {
+        Point& a = k.points[0];
+        Point& b = k.points[1];
+        if (a.x > b.x) std::swap(a.x, b.x);
+        if (a.y > b.y) std::swap(a.y, b.y);
+    }
+}
+
+Rematte* Fixes::find_rematte(int id) {
+    for (Rematte& r : rematte)
+        if (r.id == id) return &r;
+    return nullptr;
+}
+
+const Rematte* Fixes::find_rematte(int id) const {
+    for (const Rematte& r : rematte)
+        if (r.id == id) return &r;
+    return nullptr;
+}
+
+int Fixes::add_rematte(std::int64_t frame, Point a, Point b) {
+    Rematte r;
+    r.id = next_id++;
+    r.keys.push_back(ShapeKey{frame, {a, b}});
+    r.normalize();
+    rematte.push_back(std::move(r));
+    return rematte.back().id;
+}
+
+bool Fixes::remove_rematte(int id) {
+    const auto before = rematte.size();
+    rematte.erase(std::remove_if(rematte.begin(), rematte.end(),
+                                 [&](const Rematte& r) { return r.id == id; }),
+                  rematte.end());
+    return rematte.size() != before;
+}
+
 int Fixes::add_garbage(std::int64_t frame, std::vector<Point> points) {
     Garbage g;
     g.id = next_id++;
@@ -144,6 +182,8 @@ std::vector<std::int64_t> Fixes::key_frames() const {
         for (const ShapeKey& k : g.keys) frames.push_back(k.frame);
     for (const Stroke& s : strokes)
         for (const ShapeKey& k : s.keys) frames.push_back(k.frame);
+    for (const Rematte& r : rematte)
+        for (const ShapeKey& k : r.keys) frames.push_back(k.frame);
     std::sort(frames.begin(), frames.end());
     frames.erase(std::unique(frames.begin(), frames.end()), frames.end());
     return frames;
@@ -178,6 +218,14 @@ bool Fixes::load(const std::string& path, std::string* error) {
         stroke.softness = st.value("softness", 0.5f);
         if (read_keys(st, 1, &stroke.keys)) strokes.push_back(std::move(stroke));
     }
+    for (const auto& r : doc.value("rematte", nlohmann::json::array())) {
+        Rematte box;
+        box.id = r.value("id", 0);
+        if (!read_keys(r, 2, &box.keys) || box.point_count() != 2) continue;
+        box.normalize();
+        rematte.push_back(std::move(box));
+    }
+    for (const Rematte& r : rematte) next_id = std::max(next_id, r.id + 1);
     for (const Garbage& g : garbage) next_id = std::max(next_id, g.id + 1);
     for (const Stroke& st : strokes) next_id = std::max(next_id, st.id + 1);
     return true;
@@ -198,6 +246,10 @@ bool Fixes::save(const std::string& path, std::string* error) const {
                                 {"softness", st.softness},
                                 {"keys", write_keys(st.keys)}});
     doc["strokes"] = strokes_json;
+    nlohmann::json rematte_json = nlohmann::json::array();
+    for (const Rematte& r : rematte)
+        rematte_json.push_back({{"id", r.id}, {"keys", write_keys(r.keys)}});
+    doc["rematte"] = rematte_json;
 
     // Written beside and renamed into place, so a crash mid-write leaves the
     // last good file, not half of a new one.

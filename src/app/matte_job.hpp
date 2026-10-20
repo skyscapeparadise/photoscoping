@@ -30,10 +30,16 @@ public:
     void locate();
     bool available() const { return !app_.empty() && !models_.empty(); }
 
+    // What a run makes: the whole clip's mattes (--matte-clip), or the
+    // patches its re-matte boxes want (--rematte-clip). One at a time -- both
+    // want the whole GPU.
+    enum class Kind { kMatte, kRematte };
+
     // `lut` may be empty. Output goes under `out`, where the viewer reads it;
     // the run's own output goes to a log there.
-    bool start(const std::string& clip, const std::string& lut, const std::string& out,
+    bool start(Kind kind, const std::string& clip, const std::string& lut, const std::string& out,
                const std::string& name);
+    Kind kind() const { return kind_; }
     // Stops the run and waits for it to be gone.
     void stop();
 
@@ -46,6 +52,7 @@ private:
     std::string app_;
     std::string models_;
     SDL_Process* process_ = nullptr;
+    Kind kind_ = Kind::kMatte;
     SDL_IOStream* log_ = nullptr;
 };
 

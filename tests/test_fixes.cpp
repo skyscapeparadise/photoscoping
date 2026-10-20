@@ -8,6 +8,7 @@
 
 #include "fixes/fixes.hpp"
 #include "fixes/mask.hpp"
+#include "fixes/rematte.hpp"
 
 using namespace ps::fixes;
 
@@ -204,6 +205,57 @@ void test_strokes_file() {
     std::filesystem::remove(path);
 }
 
+void test_rematte() {
+    Fixes f;
+    const int id = f.add_rematte(10, {300.4f, 200.6f}, {100.0f, 50.0f});
+    f.find_rematte(id)->set(12, {{110.0f, 50.0f}, {310.0f, 200.0f}});
+    const Rematte& box = *f.find_rematte(id);
+    // Corners in either order, rounded, held in the frame.
+    const PixelRect r = rematte_rect(box, 10, 3840, 2160);
+    CHECK(r == (PixelRect{100, 50, 300, 201}));
+    CHECK(rematte_rect(box, 11, 3840, 2160).x0 == 105);
+    CHECK(rematte_rect(Rematte{{0, {{0, {{-50, -50}, {9000, 40}}}}}}, 0, 3840, 2160) ==
+          (PixelRect{0, 0, 3840, 40}));
+
+    // Live from the first key to the last, one patch a frame.
+    const std::vector<PatchJob> jobs = rematte_jobs(f, 100, 3840, 2160);
+    CHECK(jobs.size() == 3 && jobs.front().frame == 10 && jobs.back().frame == 12);
+    // Two boxes the same on a frame want one patch.
+    f.add_rematte(10, {100.0f, 50.0f}, {300.0f, 201.0f});
+    CHECK(rematte_jobs(f, 100, 3840, 2160).size() == 3);
+    // Too small is not re-matted; past the clip's end is not either.
+    f.add_rematte(20, {0, 0}, {10, 10});
+    f.add_rematte(200, {0, 0}, {100, 100});
+    CHECK(rematte_jobs(f, 100, 3840, 2160).size() == 3);
+    CHECK(patch_name(7, r) == "000007_100_50_300_201.png");
+
+    // The crop: around the box, the model's shape, inside the frame, and
+    // never magnified past four times.
+    const RematteCrop c = rematte_crop(r, 3840, 2160);
+    CHECK(c.crop.x0 <= r.x0 && c.crop.y0 <= r.y0 && c.crop.x1 >= r.x1 && c.crop.y1 >= r.y1);
+    CHECK(c.crop.x0 >= 0 && c.crop.y0 >= 0 && c.crop.x1 <= 3840 && c.crop.y1 <= 2160);
+    CHECK(c.detail <= 4.0f + 1e-3f);
+    const RematteCrop wide = rematte_crop(PixelRect{1000, 1000, 2600, 1300}, 3840, 2160);
+    CHECK(wide.wide && wide.model_w == 2048 && wide.model_h == 1152);
+    CHECK(std::abs(wide.crop.width() * 1152 - wide.crop.height() * 2048) <= 2048);
+
+    // The weight: nothing at the edge, all of it a feather in.
+    CHECK(rematte_weight(r, r.x0, r.y0 + 100) < 0.05f);
+    CHECK(rematte_weight(r, 200, 125) == 1.0f);
+
+    // And through the file.
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "photoscoping_test_rematte.json").string();
+    std::string error;
+    CHECK(f.save(path, &error));
+    Fixes back;
+    CHECK(back.load(path, &error));
+    CHECK(back.rematte.size() == f.rematte.size());
+    CHECK(back.find_rematte(id) && back.find_rematte(id)->keys.size() == 2);
+    CHECK(back.next_id == f.next_id);
+    std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
@@ -213,6 +265,7 @@ int main() {
     test_mask();
     test_strokes();
     test_strokes_file();
+    test_rematte();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);
         return 1;

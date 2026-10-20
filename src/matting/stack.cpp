@@ -102,6 +102,38 @@ std::vector<float> MattingStack::tiled(const MattingFrame& frame, const std::vec
     return out;
 }
 
+std::vector<float> MattingStack::closer(const MattingFrame& frame, const std::vector<float>& base,
+                                        int x, int y, int w, int h, bool wide, std::string* error) {
+    const MattingFrame crop = crop_frame(frame, x, y, w, h);
+    MatteModel& model = wide ? tile_ : whole_;
+    std::vector<float> look = model.run(model_input(crop, model.width(), model.height()), error);
+    if (look.empty()) return {};
+    look = resize_bilinear(look, model.width(), model.height(), w, h);
+
+    const std::size_t pixels = static_cast<std::size_t>(w) * h;
+    std::vector<float> under(pixels);
+    for (int row = 0; row < h; ++row)
+        std::copy_n(&base[static_cast<std::size_t>(y + row) * frame.width + x], w,
+                    &under[static_cast<std::size_t>(row) * w]);
+
+    // The same widening and feather the tiled stage uses, in crop pixels.
+    std::vector<std::uint8_t> soft(pixels);
+    for (std::size_t i = 0; i < pixels; ++i) {
+        const float a = std::clamp(look[i], 0.0f, 1.0f);
+        soft[i] = (a > 0.02f && a < 0.98f) || (under[i] > 0.02f && under[i] < 0.98f);
+    }
+    const std::vector<std::uint8_t> band = dilate_cross(soft, w, h, 24);
+    std::vector<float> band_f(pixels);
+    for (std::size_t i = 0; i < pixels; ++i) band_f[i] = band[i];
+    const std::vector<float> blend = gaussian_blur(band_f, w, h, 8.0f);
+    std::vector<float> fused(pixels);
+    for (std::size_t i = 0; i < pixels; ++i) {
+        const float b = std::clamp(blend[i], 0.0f, 1.0f);
+        fused[i] = b * std::clamp(look[i], 0.0f, 1.0f) + (1.0f - b) * under[i];
+    }
+    return MattingStack::band(crop, fused, error);
+}
+
 std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vector<float>& alpha,
                                       std::string* error) {
     const int w = frame.width, h = frame.height;

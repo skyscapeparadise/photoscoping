@@ -28,6 +28,10 @@ struct MattingFrame {
 // linear Rec.2020.
 MattingFrame prepare_frame(const std::vector<float>& rgba, int width, int height);
 
+// The part of a frame from (x, y), w x h, as a frame of its own. The region
+// must lie inside the frame.
+MattingFrame crop_frame(const MattingFrame& frame, int x, int y, int w, int h);
+
 // The model's input for the whole frame, made exactly as the Python stack
 // makes it (tools/matting_bakeoff.py, TorchMethod.__call__): resized to
 // out_w x out_h by PyTorch's bicubic and normalised by the ImageNet mean and

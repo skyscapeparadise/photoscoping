@@ -37,6 +37,19 @@ public:
                                    std::string* error);
     static std::vector<float> subject(const MattingFrame& frame, const std::vector<float>& alpha);
 
+    // A local re-matte: the region from (x, y), w x h, looked at again on its
+    // own, magnified to fill a model -- the 2048x1152 one if `wide`, else
+    // the square one -- then refined as the band stage refines a frame.
+    //
+    // A crop shows the model part of the subject, not the whole of it, so as
+    // with the tiles its answer is trusted for edge detail and not for what
+    // the subject is: only where it or `base` is soft, widened and feathered.
+    // Everywhere else the crop keeps `base`, the frame's own matte, so the
+    // result meets the matte around it without a seam. Returns the region's
+    // alpha, w x h.
+    std::vector<float> closer(const MattingFrame& frame, const std::vector<float>& base, int x,
+                              int y, int w, int h, bool wide, std::string* error);
+
 private:
     MatteModel whole_;
     MatteModel tile_;
