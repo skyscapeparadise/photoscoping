@@ -6,17 +6,19 @@
 
 namespace ps::app {
 
-// A run of tools/matte_clip.py over the open clip, in the background.
+// A run of the native matting stack over the open clip, in the background.
 //
-// The matting stack is Python, so the app does not do the work; it starts
-// the tool, lets it write each frame's matte as it finishes, and watches the
-// directory. Stopping kills the tool, and starting again resumes it -- frames
-// already written are not matted twice -- so closing the window mid-clip
-// costs only the frame that was in progress.
+// The run is this same executable, started again headless with --matte-clip:
+// a process of its own, so the editor never shares a GPU device across
+// threads with it, and a crash or a runaway in the matting cannot take the
+// editor down. It writes each frame's matte as it finishes, and the app
+// watches the directory. Stopping kills it, and starting again resumes it --
+// frames already written are not matted twice -- so closing the window
+// mid-clip costs only the frame that was in progress.
 //
-// The tool lives in the source checkout, beside its Python environment, so
-// this only works from a build of the checkout. available() says whether
-// both were found.
+// The models are tools/export_matting_model.py's, looked for in a models/
+// directory beside the executable or up from it. available() says whether
+// they and the executable were found.
 class MatteJob {
 public:
     MatteJob() = default;
@@ -24,26 +26,25 @@ public:
     MatteJob(const MatteJob&) = delete;
     MatteJob& operator=(const MatteJob&) = delete;
 
-    // Finds the tool, its Python and this executable. Call once.
+    // Finds this executable and the models. Call once.
     void locate();
-    bool available() const { return !python_.empty(); }
+    bool available() const { return !app_.empty() && !models_.empty(); }
 
     // `lut` may be empty. Output goes under `out`, where the viewer reads it;
-    // the tool's own output goes to a log there.
+    // the run's own output goes to a log there.
     bool start(const std::string& clip, const std::string& lut, const std::string& out,
                const std::string& name);
-    // Asks the tool to stop and waits for it.
+    // Stops the run and waits for it to be gone.
     void stop();
 
     bool running() const { return process_ != nullptr; }
-    // Checks on a running tool. True once, the call after it exits, with
+    // Checks on a running run. True once, the call after it exits, with
     // `succeeded` saying whether it finished the clip.
     bool poll_finished(bool* succeeded);
 
 private:
-    std::string python_;
-    std::string script_;
     std::string app_;
+    std::string models_;
     SDL_Process* process_ = nullptr;
     SDL_IOStream* log_ = nullptr;
 };

@@ -31,19 +31,25 @@ takes what the inspector and timeline leave, the inspector can be dragged
 wider or narrower by its left edge, and it folds away when the window gets
 too narrow for both. `--window WxH` opens at a given size and
 `--screenshot FILE` renders the window once to a PNG and exits.
-If `tools/matte_clip.py` has rendered the clip (into `renders/`, or wherever
-`--mattes DIR` points), the viewer can show it four ways: the footage, the
-matte, the matted subject over a checkerboard, or the footage washed purple
-wherever the matte drops it. The pills under the inspector switch between
-them, as do the keys 1-4, and a lilac line along the top of the ruler marks
-the frames that have a matte.
+The pill above the view buttons mattes the clip, natively: the app runs
+itself headless (`--matte-clip`) in the background, and the ruler fills in as
+each frame's matte lands in `renders/<clip>_mattes/` as a 16-bit PNG. Stopping
+it, or closing the window, keeps every finished frame; resuming picks up from
+there. Its output goes to `renders/<clip>_matte.log`.
 
-The pill above them runs the matting from inside the app: it starts
-`tools/matte_clip.py` in the background (from the checkout's `.venv`), and
-the ruler fills in as each frame's matte lands in `renders/<clip>_mattes/`.
-Stopping it, or closing the window, keeps every finished frame; resuming
-picks up from there. The finished videos replace the old ones only once the
-whole clip is done. The tool's output goes to `renders/<clip>_matte.log`.
+The viewer shows a matte four ways: the footage, the matte, the matted subject
+over a checkerboard, or the footage washed purple wherever the matte drops it.
+The pills under the inspector switch between them, as do the keys 1-4, and a
+lilac line along the top of the ruler marks the frames that have a matte. The
+subject view needs the subject rendered, which `tools/matte_clip.py` (the
+Python stack, still there for experiments) does as `<clip>_comp.mp4`.
+
+The matting stack runs through ONNX Runtime -- on the GPU through Core ML, on
+the Mac -- with two models `tools/export_matting_model.py` writes into
+`models/`. The first run on a machine compiles them for Core ML, which takes a
+few seconds and is cached under `~/Library/Caches`. `--matte FILE` runs a
+single frame through the stack headless, stage by stage, and with `--bench N`
+times N frames.
 
 `--probe` prints the working-space values of a frame instead of opening a
 window, and `--bench N` times decode and ingest over N frames.

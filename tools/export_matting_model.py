@@ -15,12 +15,19 @@ to the original model in PyTorch (tools/onnx_spike.py check --coreml):
     position bias reshaped into what Core ML takes, without which it cuts
     the model into 73 separately compiled pieces;
   - fixed-size shape arithmetic folded to constants before the conversion to
-    half precision, and the converter's mistyped casts put right.
+    half precision, and the converter's mistyped casts put right;
+  - stamped with a hash of its contents as COREML_CACHE_KEY. Without one,
+    ONNX Runtime keys Core ML's compiled model on the path the model was
+    opened by, so the same model reached by another path -- relative or
+    absolute, the checkout or the .app -- compiles again, minutes and
+    gigabytes each time; and a changed model at the same path reuses the old
+    compile, which it never notices.
 
 The export traces a full fp32 forward pass on the CPU, about 26 GB at
 2048x2048; run it under tools/guarded.py.
 
 usage: .venv/bin/python tools/export_matting_model.py [--out models] [--size WxH ...]
+       .venv/bin/python tools/export_matting_model.py --stamp MODEL.onnx ...
 """
 
 from __future__ import annotations
@@ -186,7 +193,51 @@ class Head(torch.nn.Module):
         return self.model(x)[-1].sigmoid()
 
 
-def export_fp16(width: int, height: int, out: pathlib.Path) -> pathlib.Path:
+def linears_as_gemm(model) -> int:
+    """Every Linear applied to its input flattened to two dimensions.
+
+    Swin's linear layers act on (windows, tokens, channels), which exports as
+    MatMul against the weight transposed. ONNX Runtime turns that into Core
+    ML's linear by transposing the weight back -- and writes the transposed
+    copy into Core ML's program as text, not into its weight file: four
+    gigabytes of hex for 200 MB of weights, which is most of the minutes Core
+    ML spends compiling, and most of the cache it leaves. Flattened, the same
+    layer exports as Gemm with the weight already the way round linear takes
+    it. The same arithmetic, in another shape."""
+    swapped = 0
+    for module in model.modules():
+        if not isinstance(module, torch.nn.Linear):
+            continue
+
+        def forward(x, m=module):
+            if x.dim() == 2:
+                return F.linear(x, m.weight, m.bias)
+            lead = x.shape[:-1]
+            return F.linear(x.reshape(-1, x.shape[-1]), m.weight, m.bias).reshape(
+                *lead, m.out_features)
+
+        module.forward = forward
+        swapped += 1
+    return swapped
+
+
+def stamp_cache_key(path: pathlib.Path) -> str:
+    """Sets COREML_CACHE_KEY to a hash of the model as it is without one.
+    Hex only: ONNX Runtime wants the key alphanumeric."""
+    import hashlib
+    import onnx
+    model = onnx.load(str(path))
+    kept = [p for p in model.metadata_props if p.key != "COREML_CACHE_KEY"]
+    del model.metadata_props[:]
+    model.metadata_props.extend(kept)
+    key = hashlib.sha256(model.SerializeToString()).hexdigest()[:40]
+    entry = model.metadata_props.add()
+    entry.key, entry.value = "COREML_CACHE_KEY", key
+    onnx.save(model, str(path))
+    return key
+
+
+def export_fp16(width: int, height: int, out: pathlib.Path, gemm: bool = True) -> pathlib.Path:
     import onnx
     import onnxruntime as ort
     from onnxconverter_common import float16
@@ -199,6 +250,8 @@ def export_fp16(width: int, height: int, out: pathlib.Path) -> pathlib.Path:
     model = load_torch("cpu", half=False)
     make_portable(model)
     make_coreml_friendly(model)
+    if gemm:
+        linears_as_gemm(model)
     head = Head(model)
     # Without this the trace runs with autograd on and keeps every activation
     # for a backward pass that never comes: past 45 GB at 2048².
@@ -233,6 +286,7 @@ def export_fp16(width: int, height: int, out: pathlib.Path) -> pathlib.Path:
     onnx.save(converted, str(final))
     traced.unlink()
     folded.unlink()
+    stamp_cache_key(final)
     print(f"wrote {final} ({final.stat().st_size / 1e6:.0f} MB) in "
           f"{time.perf_counter() - t0:.0f} s", flush=True)
     return final
@@ -244,10 +298,18 @@ def main() -> int:
     parser.add_argument("--out", type=pathlib.Path, default=ROOT / "models")
     parser.add_argument("--size", action="append", metavar="WxH",
                         help="export only these sizes (default: both the stack uses)")
+    parser.add_argument("--matmul", action="store_true",
+                        help="leave the linear layers as MatMul, for comparing")
+    parser.add_argument("--stamp", nargs="+", type=pathlib.Path, metavar="MODEL",
+                        help="only stamp existing models with their cache key")
     args = parser.parse_args()
+    if args.stamp:
+        for path in args.stamp:
+            print(f"{path}: COREML_CACHE_KEY {stamp_cache_key(path)}")
+        return 0
     sizes = [tuple(map(int, s.split("x"))) for s in args.size] if args.size else SIZES
     for width, height in sizes:
-        export_fp16(width, height, args.out)
+        export_fp16(width, height, args.out, gemm=not args.matmul)
     return 0
 
 

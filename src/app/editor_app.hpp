@@ -81,6 +81,8 @@ private:
     // extension, a clip otherwise.
     void open_path(const std::string& path);
     void show_open_dialog();
+    // Adds the File menu once there is a menu bar to add it to.
+    void install_menu();
     void set_playing(bool playing);
     void seek(std::int64_t frame);
     // Asks every source the view needs for the frame wanted, and shows it
@@ -168,6 +170,7 @@ private:
     // The SDL event a path chosen in the open dialog arrives as: the dialog
     // answers on a thread of its own.
     Uint32 open_event_ = 0;
+    bool file_menu_ = false;
 };
 
 }  // namespace ps::app

@@ -123,9 +123,20 @@ add_library(photoscoping_matting STATIC
     src/matting/stack.cpp
     src/matting/closed_form.cpp
     src/matting/foreground.cpp
+    src/matting/png16.cpp
 )
 target_include_directories(photoscoping_matting PUBLIC src)
+# zlib for the 16-bit PNG writer: the system's on macOS and Linux. Windows
+# has none, and will need it vendored when that port comes. On macOS it is
+# linked by name: FindZLIB's target adds the SDK's usr/include as an explicit
+# include path, ahead of libc++'s own headers, which breaks <cstddef>.
 target_link_libraries(photoscoping_matting PUBLIC onnxruntime)
+if(APPLE)
+    target_link_libraries(photoscoping_matting PUBLIC z)
+else()
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(photoscoping_matting PUBLIC ZLIB::ZLIB)
+endif()
 
 # Shaders: GLSL is the source of truth, compiled to SPIR-V (glslc) and then to
 # MSL (spirv-cross) into a generated header, the same pipeline as understory.

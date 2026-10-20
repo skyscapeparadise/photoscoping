@@ -21,9 +21,10 @@ static PSFileMenuTarget* g_target = nil;
 
 namespace ps::app {
 
-void install_file_menu(void (*open)(void* context), void* context) {
+bool install_file_menu(void (*open)(void* context), void* context) {
+    if (g_target) return true;
     NSMenu* bar = [NSApp mainMenu];
-    if (!bar || g_target) return;
+    if (!bar) return false;
     g_target = [[PSFileMenuTarget alloc] init];
     g_target->open_ = open;
     g_target->context_ = context;
@@ -39,6 +40,7 @@ void install_file_menu(void (*open)(void* context), void* context) {
     [holder setSubmenu:file];
     // After the application menu, which is always first.
     [bar insertItem:holder atIndex:MIN(1, [bar numberOfItems])];
+    return true;
 }
 
 }  // namespace ps::app

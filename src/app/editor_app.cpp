@@ -189,10 +189,7 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options op
     if (!options_.clip.empty() && !open_clip(options_.clip, options_.frame)) return false;
     refresh_matte_ui();
 
-#if defined(SDL_PLATFORM_APPLE)
-    install_file_menu([](void* self) { static_cast<EditorApp*>(self)->show_open_dialog(); },
-                      this);
-#endif
+    install_menu();
     SDL_AddEventWatch(&EditorApp::watch_events, this);
     last_tick_ = SDL_GetTicksNS();
     return true;
@@ -280,6 +277,14 @@ bool EditorApp::open_lut(const std::string& path) {
 void EditorApp::open_path(const std::string& path) {
     if (is_lut(path)) open_lut(path);
     else open_clip(path);
+}
+
+void EditorApp::install_menu() {
+#if defined(SDL_PLATFORM_APPLE)
+    if (!file_menu_)
+        file_menu_ = install_file_menu(
+            [](void* self) { static_cast<EditorApp*>(self)->show_open_dialog(); }, this);
+#endif
 }
 
 void EditorApp::show_open_dialog() {
@@ -378,7 +383,10 @@ void EditorApp::refresh_matte_ui() {
         row = std::to_string(done) + " of " + std::to_string(total);
         const double elapsed = (SDL_GetTicksNS() - job_started_ns_) / 1e9;
         const std::int64_t made = done - done_at_start_;
+        // Until the first frame lands the run is loading the models -- on a
+        // machine's first run, compiling them for Core ML, which is minutes.
         if (made > 0) row += " \xC2\xB7 " + time_left((total - done) * elapsed / made);
+        else row = "loading the model";
     } else if (source_ == MatteSource::kVideos) {
         row = "rendered";
     } else if (source_ == MatteSource::kFrames) {
@@ -714,6 +722,7 @@ void EditorApp::run() {
             do handle(event);
             while (SDL_PollEvent(&event));
         }
+        install_menu();
         poll_job();
         if (!running_ || !render()) break;
     }

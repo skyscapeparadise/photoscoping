@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <optional>
 #include <string>
 
@@ -13,6 +14,7 @@
 #include "gpu/ingest_pass.hpp"
 #include "matting/matte_model.hpp"
 #include "matting/preprocess.hpp"
+#include "matting/png16.hpp"
 #include "matting/stack.hpp"
 #include "media/video_decoder.hpp"
 
@@ -28,6 +30,7 @@ struct Options {
     int bench = 0;
     bool software = false;
     std::string matte;
+    std::string matte_clip;
     std::string matte_stage = "subject";
     std::string models = "models";
     bool model_cpu = false;
@@ -56,6 +59,10 @@ void usage() {
         "  --matte-stage coarse|tiled|band|subject\n"
         "                 how far through the stack --matte goes (default\n"
         "                 subject, whose output is RGB linear Rec.709, interleaved)\n"
+        "  --matte-clip DIR\n"
+        "                 matte every frame of the clip with the native stack, each\n"
+        "                 as a 16-bit PNG in DIR/<clip>_mattes/ the moment it is done;\n"
+        "                 frames already there are skipped, so a stopped run resumes\n"
         "  --models DIR   where tools/export_matting_model.py wrote the models\n"
         "                 (default: models)\n"
         "  --model-cpu    run the models on the CPU, not Core ML\n"
@@ -101,6 +108,10 @@ std::optional<Options> parse_args(int argc, char** argv) {
             const char* v = value();
             if (!v) return std::nullopt;
             o.matte = v;
+        } else if (a == "--matte-clip") {
+            const char* v = value();
+            if (!v) return std::nullopt;
+            o.matte_clip = v;
         } else if (a == "--matte-stage") {
             const char* v = value();
             const std::string stage = v ? v : "";
@@ -139,7 +150,9 @@ std::optional<Options> parse_args(int argc, char** argv) {
         }
     }
     if (!o.export_path.empty()) o.probe = true;
-    if ((o.probe || o.bench || o.pipe || !o.matte.empty()) && o.clip.empty()) return std::nullopt;
+    if ((o.probe || o.bench || o.pipe || !o.matte.empty() || !o.matte_clip.empty()) &&
+        o.clip.empty())
+        return std::nullopt;
     return o;
 }
 
@@ -317,6 +330,95 @@ bool run_matte(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestPass& 
     return true;
 }
 
+// The whole clip through the native stack, as the app's matting job: each
+// frame's matte written as a 16-bit PNG the moment it is done, under a
+// temporary name and renamed into place so a reader never sees half of one.
+// Frames already there are skipped, so a run that was stopped picks up where
+// it left off. Progress goes to stdout, a line a frame, for the log.
+bool run_matte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestPass& ingest,
+                    ps::media::VideoDecoder& decoder, const ps::gpu::InputTransform& transform) {
+    namespace fs = std::filesystem;
+    const fs::path out =
+        fs::path(o.matte_clip) / (fs::path(o.clip).stem().string() + "_mattes");
+    std::error_code ec;
+    fs::create_directories(out, ec);
+    auto frame_png = [&](std::int64_t i) {
+        char name[32];
+        std::snprintf(name, sizeof name, "%06lld.png", static_cast<long long>(i));
+        return out / name;
+    };
+
+    const std::int64_t total = decoder.frame_count();
+    std::int64_t first = 0;
+    while (first < total && fs::exists(frame_png(first), ec)) ++first;
+    std::int64_t done = 0;
+    for (std::int64_t i = 0; i < total; ++i) done += fs::exists(frame_png(i), ec) ? 1 : 0;
+    std::printf("%s: %lld frames, %lld already matted\n", o.clip.c_str(),
+                static_cast<long long>(total), static_cast<long long>(done));
+    std::fflush(stdout);
+    if (done >= total) return true;
+
+    const Uint64 load_start = SDL_GetTicksNS();
+    ps::matting::MattingStack stack;
+    std::string error;
+    const auto backend =
+        o.model_cpu ? ps::matting::MatteModel::Backend::kCpu : ps::matting::MatteModel::Backend::kGpu;
+    if (!stack.load(o.models, backend, ps::matting::default_cache_dir(), &error)) {
+        std::fprintf(stderr, "cannot load the models in %s: %s\n", o.models.c_str(), error.c_str());
+        return false;
+    }
+    std::printf("models loaded in %.0f s\n", (SDL_GetTicksNS() - load_start) / 1e9);
+    std::fflush(stdout);
+
+    if (!decoder.seek_frame(first)) {
+        std::fprintf(stderr, "cannot decode frame %lld\n", static_cast<long long>(first));
+        return false;
+    }
+    const Uint64 started = SDL_GetTicksNS();
+    std::int64_t made = 0;
+    for (std::int64_t i = first; i < total; ++i) {
+        if (i > first && !decoder.read_next()) break;
+        if (fs::exists(frame_png(i), ec)) continue;
+        const Uint64 t = SDL_GetTicksNS();
+
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
+        const bool ingested = ingest.process(cmd, decoder, transform);
+        SDL_SubmitGPUCommandBuffer(cmd);
+        if (!ingested) return false;
+        const ps::matting::MattingFrame frame = ps::matting::prepare_frame(
+            ingest.read_working(), static_cast<int>(ingest.width()),
+            static_cast<int>(ingest.height()));
+
+        std::vector<float> alpha = stack.coarse(frame, &error);
+        if (!alpha.empty()) alpha = stack.tiled(frame, alpha, &error);
+        if (!alpha.empty()) alpha = ps::matting::MattingStack::band(frame, alpha, &error);
+        if (alpha.empty()) {
+            std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(i), error.c_str());
+            return false;
+        }
+        fs::path partial = frame_png(i);
+        partial.replace_extension(".partial.png");
+        if (!ps::matting::write_png16(partial.string(), alpha, frame.width, frame.height)) {
+            std::fprintf(stderr, "cannot write %s\n", partial.c_str());
+            return false;
+        }
+        fs::rename(partial, frame_png(i), ec);
+        if (ec) {
+            std::fprintf(stderr, "cannot rename %s: %s\n", partial.c_str(), ec.message().c_str());
+            return false;
+        }
+
+        ++made;
+        ++done;
+        const double per = (SDL_GetTicksNS() - started) / 1e9 / static_cast<double>(made);
+        std::printf("  %lld/%lld  frame %lld  %.2f s  eta %.1f min\n", static_cast<long long>(done),
+                    static_cast<long long>(total), static_cast<long long>(i),
+                    (SDL_GetTicksNS() - t) / 1e9, per * static_cast<double>(total - done) / 60.0);
+        std::fflush(stdout);
+    }
+    return done >= total;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -351,7 +453,8 @@ int main(int argc, char** argv) {
     // The headless modes decode here; the window opens its clip itself, on
     // a worker thread, the same way it opens one dropped on it later.
     const bool headless =
-        options->probe || options->bench || options->pipe || !options->matte.empty();
+        options->probe || options->bench || options->pipe || !options->matte.empty() ||
+        !options->matte_clip.empty();
     ps::media::VideoDecoder decoder;
     if (headless) {
         if (!decoder.open(options->clip, !options->software)) return 1;
@@ -391,6 +494,14 @@ int main(int argc, char** argv) {
     if (headless) {
         transform = ps::gpu::transform_for(decoder.signal(), lut ? &*lut : nullptr);
         describe(decoder, transform, lut, options->pipe ? stderr : stdout);
+    }
+
+    if (!options->matte_clip.empty()) {
+        const int status = run_matte_clip(*options, gpu, ingest, decoder, transform) ? 0 : 1;
+        ingest.destroy();
+        gpu.destroy();
+        SDL_Quit();
+        return status;
     }
 
     if (!options->matte.empty()) {

@@ -31,15 +31,14 @@ void MatteJob::locate() {
             break;
         }
     }
-    // The checkout is a few levels above either: build/, or
+    // models/ in Resources, or in the checkout a few levels above build/ or
     // build/photoscoping.app/Contents/Resources/.
     fs::path dir = root;
-    for (int up = 0; up < 5 && !app_.empty(); ++up, dir = dir / "..") {
-        const fs::path script = dir / "tools" / "matte_clip.py";
-        const fs::path python = dir / ".venv" / "bin" / "python";
-        if (present(script) && present(python)) {
-            script_ = script.lexically_normal().string();
-            python_ = python.lexically_normal().string();
+    for (int up = 0; up < 5; ++up, dir = dir / "..") {
+        const fs::path models = dir / "models";
+        if (present(models / "birefnet_hr_matting_2048x2048_fp16.onnx") &&
+            present(models / "birefnet_hr_matting_2048x1152_fp16.onnx")) {
+            models_ = models.lexically_normal().string();
             return;
         }
     }
@@ -51,7 +50,7 @@ bool MatteJob::start(const std::string& clip, const std::string& lut, const std:
     std::error_code ec;
     fs::create_directories(out, ec);
 
-    std::vector<std::string> args = {python_, script_, clip, "--out", out, "--app", app_};
+    std::vector<std::string> args = {app_, clip, "--matte-clip", out, "--models", models_};
     if (!lut.empty()) {
         args.push_back("--lut");
         args.push_back(lut);
@@ -60,16 +59,15 @@ bool MatteJob::start(const std::string& clip, const std::string& lut, const std:
     for (const std::string& a : args) argv.push_back(a.c_str());
     argv.push_back(nullptr);
 
-    // Everything the tool says goes to a log beside its output rather than
+    // Everything the run says goes to a log beside its output rather than
     // into this process's terminal, where it would interleave with ours.
     const std::string log_path = (fs::path(out) / (name + "_matte.log")).string();
     log_ = SDL_IOFromFile(log_path.c_str(), "w");
 
     // Our environment, less Metal's validation layer. SDL switches that on
-    // for this process when the GPU device is made in debug mode, a child
-    // inherits it, and PyTorch's Metal kernels fail its checks -- the tool
-    // dies on an assertion a few seconds in, though it runs cleanly from a
-    // terminal.
+    // for this process when a debug build makes its GPU device, a child
+    // inherits it, and Core ML's Metal kernels fail its checks -- PyTorch's
+    // did, a few seconds in, when the run was Python.
     SDL_Environment* env = SDL_CreateEnvironment(/*populated=*/true);
     if (env) SDL_UnsetEnvironmentVariable(env, "MTL_DEBUG_LAYER");
 
@@ -87,7 +85,7 @@ bool MatteJob::start(const std::string& clip, const std::string& lut, const std:
     SDL_DestroyProperties(props);
     if (env) SDL_DestroyEnvironment(env);
     if (!process_) {
-        SDL_Log("could not start %s: %s", script_.c_str(), SDL_GetError());
+        SDL_Log("could not start the matting run: %s", SDL_GetError());
         if (log_) SDL_CloseIO(log_);
         log_ = nullptr;
         return false;
@@ -110,10 +108,12 @@ bool MatteJob::poll_finished(bool* succeeded) {
 
 void MatteJob::stop() {
     if (!process_) return;
-    // A plain terminate is enough: the tool's own children are the frame
-    // stream and two encoders, and its exit closes the pipes that feed them,
-    // which ends them too. The frames written so far stay, for a resume.
-    SDL_KillProcess(process_, /*force=*/false);
+    // Killed outright. A terminate would not do: the run has SDL, which turns
+    // the signal into a quit event its loop never reads, and waiting on it
+    // would hold the editor until the whole clip was done. Nothing is lost --
+    // every frame is renamed into place whole, and the ones written so far
+    // stay for a resume.
+    SDL_KillProcess(process_, /*force=*/true);
     SDL_WaitProcess(process_, /*block=*/true, nullptr);
     SDL_DestroyProcess(process_);
     process_ = nullptr;

@@ -46,15 +46,16 @@ bool GpuContext::create(const char* title, int width, int height, ColorMode pref
 
     // Validation catches malformed pipeline and binding state at the call that
     // caused it rather than as a corrupted frame several passes later, at a
-    // cost in speed -- so in debug builds, and not in release ones. It also
-    // sets MTL_DEBUG_LAYER for the process, which anything it starts inherits
-    // (see MatteJob).
+    // cost in speed -- so in debug builds, and only for the window. The
+    // headless modes (probe, pipe, the matting job) render nothing to check,
+    // and validation sets MTL_DEBUG_LAYER for the whole process, under which
+    // Core ML's and PyTorch's own Metal kernels fail its assertions.
 #ifdef NDEBUG
-    constexpr bool kDebugDevice = false;
+    const bool debug_device = false;
 #else
-    constexpr bool kDebugDevice = true;
+    const bool debug_device = visible;
 #endif
-    device_ = SDL_CreateGPUDevice(kShaderFormats, kDebugDevice, /*name=*/nullptr);
+    device_ = SDL_CreateGPUDevice(kShaderFormats, debug_device, /*name=*/nullptr);
     if (!device_) {
         SDL_Log("SDL_CreateGPUDevice failed: %s", SDL_GetError());
         destroy();
