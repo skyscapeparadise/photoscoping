@@ -60,6 +60,9 @@ void blend_patch(std::vector<float>& alpha, int frame_w, const PixelRect& box,
 // "000123_x0_y0_x1_y1.png".
 std::string patch_name(std::int64_t frame, const PixelRect& box);
 
+// Whether a file name is a patch's: exactly what patch_name() makes.
+bool is_patch_name(const std::string& name);
+
 struct PatchJob {
     std::int64_t frame = 0;
     PixelRect box;

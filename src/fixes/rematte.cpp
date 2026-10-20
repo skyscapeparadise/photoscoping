@@ -89,6 +89,15 @@ std::string patch_name(std::int64_t frame, const PixelRect& box) {
     return name;
 }
 
+bool is_patch_name(const std::string& name) {
+    long long frame = 0;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    char tail[8] = {};
+    if (std::sscanf(name.c_str(), "%6lld_%d_%d_%d_%d%7s", &frame, &x0, &y0, &x1, &y1, tail) != 6)
+        return false;
+    return std::string(tail) == ".png" && patch_name(frame, PixelRect{x0, y0, x1, y1}) == name;
+}
+
 std::vector<PatchJob> rematte_jobs(const Fixes& fixes, std::int64_t frame_count, int frame_w,
                                    int frame_h) {
     std::vector<PatchJob> jobs;

@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <optional>
+#include <set>
 #include <string>
 
 #include "app/editor_app.hpp"
@@ -482,8 +483,26 @@ bool run_rematte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::Inges
         return false;
     }
     const int fw = decoder.width(), fh = decoder.height();
+    const std::vector<ps::fixes::PatchJob> wanted =
+        ps::fixes::rematte_jobs(fixes, decoder.frame_count(), fw, fh);
+
+    // Patches no box wants any more -- left where a box was moved from, or
+    // by a box since deleted -- are cleared first. Only patches: a file in
+    // here named any other way is not this run's to remove.
+    std::set<std::string> keep;
+    for (const ps::fixes::PatchJob& j : wanted) keep.insert(ps::fixes::patch_name(j.frame, j.box));
+    std::size_t cleared = 0;
+    for (fs::directory_iterator it(out, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (it->is_regular_file() && ps::fixes::is_patch_name(name) && !keep.count(name)) {
+            std::error_code removed;
+            if (fs::remove(it->path(), removed)) ++cleared;
+        }
+    }
+    if (cleared) std::printf("cleared %zu patches no box wants\n", cleared);
+
     std::vector<ps::fixes::PatchJob> jobs;
-    for (const ps::fixes::PatchJob& j : ps::fixes::rematte_jobs(fixes, decoder.frame_count(), fw, fh))
+    for (const ps::fixes::PatchJob& j : wanted)
         if (!fs::exists(out / ps::fixes::patch_name(j.frame, j.box), ec)) jobs.push_back(j);
     std::printf("%s: %zu patches to make\n", o.clip.c_str(), jobs.size());
     std::fflush(stdout);

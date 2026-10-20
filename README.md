@@ -85,7 +85,7 @@ with closed-form matting, and writes the box as a 16-bit PNG in
 `renders/<clip>_rematte/`, named for its frame and the box to the pixel. The
 viewer blends it into the matte, feathered in from the box's edge, before
 garbage mattes and paint apply. Moving a box only re-mattes the frames it
-moved on. `--rematte-clip DIR` runs it headless.
+moved on, and each run clears away the patches no box wants any more. `--rematte-clip DIR` runs it headless.
 
 File > Export Subject writes the matted subject with its alpha: ProRes 4444
 (Command-E, the default), VP9 in WebM, or a folder of 16-bit RGBA PNGs. File >

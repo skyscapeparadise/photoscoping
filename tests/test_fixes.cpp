@@ -228,6 +228,11 @@ void test_rematte() {
     f.add_rematte(200, {0, 0}, {100, 100});
     CHECK(rematte_jobs(f, 100, 3840, 2160).size() == 3);
     CHECK(patch_name(7, r) == "000007_100_50_300_201.png");
+    CHECK(is_patch_name("000007_100_50_300_201.png"));
+    CHECK(!is_patch_name("000007_100_50_300_201.partial.png"));
+    CHECK(!is_patch_name("000007.png"));
+    CHECK(!is_patch_name("notes_1_2_3_4.png"));
+    CHECK(!is_patch_name("000007_100_50_300_201.png.bak"));
 
     // The crop: around the box, the model's shape, inside the frame, and
     // never magnified past four times.
