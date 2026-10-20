@@ -19,7 +19,7 @@ struct DisplayUniform {
     float nits_per_unit;
     float view;
     float checker_px;
-    float has_garbage;
+    float has_fixes;
 };
 
 // The overlay's wash: the nebula's plum, linear Rec.709, over most of what
@@ -85,19 +85,19 @@ void DisplayPass::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, const 
         u.nits_per_unit = DrawList::kSdrRefNits;
         u.view = static_cast<float>(view);
         u.checker_px = kCheckerLogical * scale;
-        u.has_garbage = frame.garbage ? 1.0f : 0.0f;
+        u.has_fixes = frame.fixes ? 1.0f : 0.0f;
 
         SDL_BindGPUGraphicsPipeline(pass, pipeline_);
         // Every declared sampler must be bound; a texture a view does not
         // read stands in with the footage.
         SDL_GPUSampler* sampler = nearest ? nearest_ : sampler_;
-        // The mask is always filtered: it is half the frame's resolution, and
-        // its edges are meant to be soft.
+        // The fixes are always filtered: they are half the frame's
+        // resolution, and their edges are meant to be soft.
         const SDL_GPUTextureSamplerBinding bindings[4] = {
             {frame.working, sampler},
             {frame.matte ? frame.matte : frame.working, sampler},
             {frame.subject ? frame.subject : frame.working, sampler},
-            {frame.garbage ? frame.garbage : frame.working, sampler_},
+            {frame.fixes ? frame.fixes : frame.working, sampler_},
         };
         SDL_BindGPUFragmentSamplers(pass, 0, bindings, 4);
         SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof u);

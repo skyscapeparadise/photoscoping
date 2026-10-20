@@ -37,6 +37,9 @@ public:
     ToolStrip* tools() const { return tools_; }
     ViewSwitch* views() const { return views_; }
     void set_clip(const ClipInfo& info);
+    // The card's first line, which is the tool's name unless the tool has
+    // more to say -- paint says which way it paints.
+    void set_heading(const std::string& text);
     // Changes one row's value in place, by its label.
     void set_row(const std::string& label, const std::string& value);
 

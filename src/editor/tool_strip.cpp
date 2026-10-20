@@ -52,7 +52,7 @@ void ToolStrip::build(const gpu::IconAtlas& atlas, ui::FontCache& fonts) {
         {"pinch", nullptr, Tool::kNavigate, false, true},
         {nullptr, "garbage", Tool::kGarbage, false, true},
         {nullptr, "re-matte", Tool::kRematte, false, false},
-        {nullptr, "paint", Tool::kPaint, false, false},
+        {nullptr, "paint", Tool::kPaint, false, true},
         {"preview", nullptr, Tool::kSelect, true, true},
     };
 

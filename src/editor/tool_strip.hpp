@@ -18,7 +18,7 @@ namespace ps::editor {
 //   navigate  drag to pan (zoom is everywhere)
 //   garbage   draw and keyframe garbage mattes
 //   rematte   a box the stack re-runs in at more detail (not built yet)
-//   paint     paint coverage out of the matte and back in (not built yet)
+//   paint     paint coverage out of the matte and back in
 enum class Tool { kSelect, kNavigate, kGarbage, kRematte, kPaint };
 
 // Lowercase, as the inspector shows it.

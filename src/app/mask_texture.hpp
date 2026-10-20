@@ -7,8 +7,8 @@
 
 namespace ps::app {
 
-// A single-channel texture refilled from the CPU: the garbage mattes'
-// mask, which changes when they do or the frame does.
+// A texture refilled from the CPU: the fixes' mask, which changes when they
+// do or the frame does. Four bytes a pixel.
 class MaskTexture {
 public:
     MaskTexture() = default;
@@ -19,7 +19,8 @@ public:
     void create(SDL_GPUDevice* device) { device_ = device; }
     void destroy();
 
-    // Records the upload into `cmd`, ahead of whatever samples it.
+    // Records the upload into `cmd`, ahead of whatever samples it. `values`
+    // is width x height x 4.
     bool upload(SDL_GPUCommandBuffer* cmd, const std::vector<std::uint8_t>& values, int width,
                 int height);
     SDL_GPUTexture* texture() const { return texture_; }

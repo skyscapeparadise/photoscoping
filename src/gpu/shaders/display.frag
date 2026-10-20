@@ -8,8 +8,9 @@
 //
 // Shown one of four ways. The renders it reads are the clip's own frame,
 // matted: `matte` holds coverage in its red channel, `subject` the refined
-// subject already multiplied by it, over black. `garbage` is what the hand-
-// drawn garbage mattes leave of the frame, multiplied into both.
+// subject already multiplied by it, over black. `fixes` is what the hand-made
+// fixes do to the matte (fixes/mask.hpp): red, what the garbage mattes leave;
+// green and blue, the paint strokes folded into alpha -> green * alpha + blue.
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
@@ -17,7 +18,7 @@ layout(location = 0) out vec4 out_color;
 layout(set = 2, binding = 0) uniform sampler2D working;
 layout(set = 2, binding = 1) uniform sampler2D matte;
 layout(set = 2, binding = 2) uniform sampler2D subject;
-layout(set = 2, binding = 3) uniform sampler2D garbage;
+layout(set = 2, binding = 3) uniform sampler2D fixes;
 
 // Must match ps::gpu::DisplayView.
 const int kViewFootage = 0;
@@ -38,8 +39,8 @@ layout(set = 3, binding = 0) uniform Display {
     float view;
     // The checkerboard behind a subject: one square, in target pixels.
     float checker_px;
-    // 1 when there are garbage mattes to apply.
-    float has_garbage;
+    // 1 when there are fixes to apply.
+    float has_fixes;
 } display;
 
 vec3 to_display(vec3 c) {
@@ -53,8 +54,8 @@ void main() {
     if (view == kViewFootage) {
         rgb = to_display(texture(working, v_uv).rgb);
     } else {
-        float g = display.has_garbage > 0.5 ? texture(garbage, v_uv).r : 1.0;
-        float a = clamp(texture(matte, v_uv).r, 0.0, 1.0) * g;
+        vec4 f = display.has_fixes > 0.5 ? texture(fixes, v_uv) : vec4(1.0, 1.0, 0.0, 1.0);
+        float a = (clamp(texture(matte, v_uv).r, 0.0, 1.0) * f.g + f.b) * f.r;
         if (view == kViewMatte) {
             // As a matte reads in any player: its values shown as encoded
             // greys, so 0.5 coverage is a middle grey rather than a dark one.
@@ -63,7 +64,11 @@ void main() {
             vec2 cell = floor(gl_FragCoord.xy / display.checker_px);
             float light = mod(cell.x + cell.y, 2.0);
             vec3 behind = srgb_eotf(vec3(mix(0.16, 0.24, light)));
-            rgb = to_display(texture(subject, v_uv).rgb) * g + (1.0 - a) * behind;
+            // Coverage painted in has no subject colour from the stack -- it
+            // called that background -- so it takes the footage's.
+            vec3 painted = to_display(texture(subject, v_uv).rgb) * f.g +
+                           to_display(texture(working, v_uv).rgb) * f.b;
+            rgb = painted * f.r + (1.0 - a) * behind;
         } else {
             // What the matte keeps, untouched; what it drops, washed over --
             // so an edge reads against the footage it was cut from.

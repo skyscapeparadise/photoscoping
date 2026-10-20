@@ -189,6 +189,7 @@ add_library(photoscoping_ui STATIC
     src/editor/viewer.cpp
     src/editor/lines.cpp
     src/editor/garbage_tool.cpp
+    src/editor/paint_tool.cpp
 )
 add_dependencies(photoscoping_ui photoscoping_shaders)
 target_include_directories(photoscoping_ui PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")

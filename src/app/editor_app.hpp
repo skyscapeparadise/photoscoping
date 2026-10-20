@@ -150,6 +150,7 @@ private:
     std::uint64_t mask_version_ = ~0ull;
     std::int64_t mask_frame_ = -1;
     MaskTexture mask_;
+    bool mask_live_ = false;
     // Whether the clip's fixes file read cleanly (or was not there); if it
     // did not, it is never saved over.
     bool fixes_readable_ = true;

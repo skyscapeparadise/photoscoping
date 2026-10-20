@@ -16,12 +16,12 @@ void MaskTexture::destroy() {
 
 bool MaskTexture::upload(SDL_GPUCommandBuffer* cmd, const std::vector<std::uint8_t>& values,
                          int width, int height) {
-    if (!device_ || values.size() != static_cast<std::size_t>(width) * height) return false;
+    if (!device_ || values.size() != static_cast<std::size_t>(width) * height * 4) return false;
     if (!texture_ || width != width_ || height != height_) {
         destroy();
         SDL_GPUTextureCreateInfo info = {};
         info.type = SDL_GPU_TEXTURETYPE_2D;
-        info.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
         info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
         info.width = static_cast<Uint32>(width);
         info.height = static_cast<Uint32>(height);

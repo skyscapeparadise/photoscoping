@@ -25,35 +25,67 @@ struct ShapeKey {
     std::vector<Point> points;
 };
 
-// A garbage matte: a closed polygon the subject is always inside. Outside
-// it, the matte is forced to background. Every key has the same number of
-// points, so a shape tweens point for point.
-struct Garbage {
+// Points keyed across the clip: what garbage mattes and paint strokes have
+// in common. Every key has the same number of points, so they tween point
+// for point.
+struct Track {
     int id = 0;
     std::vector<ShapeKey> keys;  // ascending by frame, never empty
 
-    // The shape at `frame`: a key's own, or the two around it mixed
+    // The points at `frame`: a key's own, or the two around it mixed
     // linearly, or the nearest key held past either end.
     std::vector<Point> at(std::int64_t frame) const;
     bool keyed_at(std::int64_t frame) const;
-    // Sets the shape at `frame`, adding a key there if there is none.
+    // Sets the points at `frame`, adding a key there if there is none.
     void set(std::int64_t frame, std::vector<Point> points);
     // Removes the key at `frame`. False if there is none there, or it is
-    // the last key, which removing would leave the shape without a shape.
+    // the last key, which removing would leave the track with nothing.
     bool remove_key(std::int64_t frame);
     std::size_t point_count() const { return keys.empty() ? 0 : keys.front().points.size(); }
+    std::int64_t first_frame() const { return keys.front().frame; }
+    std::int64_t last_frame() const { return keys.back().frame; }
+};
+
+// A garbage matte: a closed polygon the subject is always inside. Outside
+// it, the matte is forced to background. It holds before its first key and
+// after its last: where the subject can be does not stop being true.
+struct Garbage : Track {};
+
+// Which way a stroke paints the matte.
+enum class PaintMode { kOut, kIn };
+
+// A paint stroke: a line of points with a radius, painting coverage out of
+// the matte or back into it. Unlike a garbage matte it is there only from
+// its first key to its last -- a stroke fixes the frames it was meant for,
+// and one painted on a single frame fixes that frame -- and tweens between.
+struct Stroke : Track {
+    PaintMode mode = PaintMode::kOut;
+    float radius = 20.0f;  // image pixels
+    // Edge softness: the outer part of the radius that fades, 0..1.
+    float softness = 0.5f;
+
+    bool live_at(std::int64_t frame) const {
+        return !keys.empty() && frame >= first_frame() && frame <= last_frame();
+    }
 };
 
 struct Fixes {
     std::vector<Garbage> garbage;
+    // In the order they were painted, which is the order they apply in.
+    std::vector<Stroke> strokes;
     int next_id = 1;
 
     Garbage* find(int id);
     const Garbage* find(int id) const;
+    Stroke* find_stroke(int id);
+    const Stroke* find_stroke(int id) const;
     // A new shape with one key, at `frame`. Returns its id.
     int add_garbage(std::int64_t frame, std::vector<Point> points);
     bool remove_garbage(int id);
-    bool empty() const { return garbage.empty(); }
+    // A new stroke with one key, at `frame`. Returns its id.
+    int add_stroke(std::int64_t frame, PaintMode mode, float radius, std::vector<Point> points);
+    bool remove_stroke(int id);
+    bool empty() const { return garbage.empty() && strokes.empty(); }
     // Every frame any fix has a key on, ascending, once each.
     std::vector<std::int64_t> key_frames() const;
 

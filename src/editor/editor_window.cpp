@@ -41,12 +41,17 @@ void EditorWindow::build(ui::FontCache& fonts, const gpu::IconAtlas& large_icons
     viewer_->build(fonts);
     garbage_ = viewer_->add<GarbageTool>();
     garbage_->attach(viewer_, fixes);
+    paint_ = viewer_->add<PaintTool>();
+    paint_->attach(viewer_, fixes);
+    paint_->on_brush_changed = [this] { inspector_->set_heading(paint_->heading()); };
 
     inspector_ = add<Inspector>();
     inspector_->build(fonts, large_icons);
     inspector_->on_tool_changed = [this](Tool tool) {
         viewer_->set_navigating(tool == Tool::kNavigate);
         garbage_->set_active(tool == Tool::kGarbage);
+        paint_->set_active(tool == Tool::kPaint);
+        if (tool == Tool::kPaint) inspector_->set_heading(paint_->heading());
     };
     inspector_->tools()->on_preview = [this] { toggle_panel(); };
 

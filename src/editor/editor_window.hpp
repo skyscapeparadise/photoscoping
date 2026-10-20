@@ -2,6 +2,7 @@
 
 #include "editor/garbage_tool.hpp"
 #include "editor/inspector.hpp"
+#include "editor/paint_tool.hpp"
 #include "editor/timeline.hpp"
 #include "editor/viewer.hpp"
 #include "gpu/icon_atlas.hpp"
@@ -30,6 +31,7 @@ public:
     Inspector* inspector() const { return inspector_; }
     Viewer* viewer() const { return viewer_; }
     GarbageTool* garbage_tool() const { return garbage_; }
+    PaintTool* paint_tool() const { return paint_; }
     Timeline* timeline() const { return timeline_; }
 
     // In logical pixels, as of the last layout. The footage and the nebula are
@@ -53,6 +55,7 @@ private:
 
     Viewer* viewer_ = nullptr;
     GarbageTool* garbage_ = nullptr;
+    PaintTool* paint_ = nullptr;
     Inspector* inspector_ = nullptr;
     Timeline* timeline_ = nullptr;
     ui::Node* splitter_ = nullptr;

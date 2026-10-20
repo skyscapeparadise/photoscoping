@@ -156,6 +156,10 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options op
     garbage->on_edit_begin = [this] { history_.record(fixes_); };
     garbage->on_live_change = [this] { fixes_changed(/*save=*/false); };
     garbage->on_changed = [this] { fixes_changed(/*save=*/true); };
+    editor::PaintTool* paint = root_.paint_tool();
+    paint->on_edit_begin = [this] { history_.record(fixes_); };
+    paint->on_live_change = [this] { fixes_changed(/*save=*/false); };
+    paint->on_changed = [this] { fixes_changed(/*save=*/true); };
     root_.inspector()->views()->on_view_changed = [this](editor::View view) { view_ = view; };
     root_.inspector()->on_action = [this] { toggle_job(); };
     job_.locate();
@@ -524,6 +528,7 @@ void EditorApp::handle(const SDL_Event& event) {
         case SDL_EVENT_KEY_DOWN: {
             const std::int64_t at = std::max<std::int64_t>(shown_, 0);
             if (root_.garbage_tool()->handle_key(event.key.key, event.key.mod)) break;
+            if (root_.paint_tool()->handle_key(event.key.key, event.key.mod)) break;
             if ((event.key.mod & (SDL_KMOD_GUI | SDL_KMOD_CTRL)) != 0 && event.key.key == SDLK_Z) {
                 undo(/*redo=*/(event.key.mod & SDL_KMOD_SHIFT) != 0);
                 break;
@@ -675,6 +680,7 @@ void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, 
 
     root_.viewer()->set_device_scale(scale);
     root_.garbage_tool()->set_frame(std::max<std::int64_t>(shown_, 0));
+    root_.paint_tool()->set_frame(std::max<std::int64_t>(shown_, 0));
     root_.layout(static_cast<float>(lw), static_cast<float>(lh));
     input_.update(root_);
     animating_ = root_.tick(dt);
@@ -697,19 +703,20 @@ void EditorApp::composite_backdrop(SDL_GPUCommandBuffer* cmd, float scale) {
         frame.height = ingest_->height();
         // Only renders of the frame on screen: one still catching up after a
         // change of view is left out, and the footage shows alone meanwhile.
-        // The garbage mattes' mask, made again only when they or the frame
-        // have changed, and only for a view that uses the matte.
-        if (!fixes_.garbage.empty() && view_ != editor::View::kFootage) {
+        // The fixes' mask, made again only when they or the frame have
+        // changed, and only for a view that uses the matte. None live on
+        // this frame -- strokes come and go -- is no mask at all.
+        if (!fixes_.empty() && view_ != editor::View::kFootage) {
             if (mask_version_ != fixes_version_ || mask_frame_ != shown_) {
                 const int mw = std::max(1, static_cast<int>(frame.width) / 2);
                 const int mh = std::max(1, static_cast<int>(frame.height) / 2);
                 const float sx = static_cast<float>(mw) / static_cast<float>(frame.width);
-                if (mask_.upload(cmd, fixes::garbage_mask(fixes_, shown_, mw, mh, sx), mw, mh)) {
-                    mask_version_ = fixes_version_;
-                    mask_frame_ = shown_;
-                }
+                const std::vector<std::uint8_t> mask = fixes::fixes_mask(fixes_, shown_, mw, mh, sx);
+                mask_live_ = !mask.empty() && mask_.upload(cmd, mask, mw, mh);
+                mask_version_ = fixes_version_;
+                mask_frame_ = shown_;
             }
-            frame.garbage = mask_.texture();
+            if (mask_live_) frame.fixes = mask_.texture();
         }
         if (source_ == MatteSource::kFrames && frames_.shown() == shown_) {
             frame.matte = frames_.texture();

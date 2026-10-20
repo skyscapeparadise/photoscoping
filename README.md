@@ -60,6 +60,16 @@ current frame. Backspace removes the selected shape's key on this frame (or
 the shape, if it has no other), Shift-Backspace the whole shape, and Escape
 abandons one being drawn. Their keys are marked along the ruler.
 
+The paint tool paints coverage out of the matte, or back into it. Drag to
+paint; Option while starting a stroke paints the other way, X swaps which way
+is the default, and [ and ] shrink and grow the brush. A stroke is keyframed
+like a shape but is live only from its first key to its last, so it never
+leaks onto frames it was not meant for. Command-drag a stroke to move it on
+this frame, which keys it there; K keys the selected stroke on this frame as
+it stands, carrying it further; Backspace and Shift-Backspace delete as with
+shapes. Strokes apply in the order they were painted, and inside the garbage
+mattes.
+
 The viewer shows a matte four ways: the footage, the matte, the matted subject
 over a checkerboard, or the footage washed purple wherever the matte drops it.
 The pills under the inspector switch between them, as do the keys 1-4, and a

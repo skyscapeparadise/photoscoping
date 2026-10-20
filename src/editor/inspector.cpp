@@ -91,6 +91,8 @@ void Inspector::set_clip(const ClipInfo& info) {
     rebuild_rows();
 }
 
+void Inspector::set_heading(const std::string& text) { heading_->set_text(text); }
+
 void Inspector::set_row(const std::string& label, const std::string& value) {
     for (std::size_t i = 0; i < info_.rows.size(); ++i) {
         if (info_.rows[i].first != label) continue;

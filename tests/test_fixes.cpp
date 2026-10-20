@@ -137,6 +137,73 @@ void test_mask() {
     CHECK(m[1 * 16 + 1] == 255 && m[8 * 16 + 8] == 255 && m[2 * 16 + 8] == 0);
 }
 
+void test_strokes() {
+    Fixes f;
+    const int id = f.add_stroke(10, PaintMode::kOut, 3.0f, {{8, 8}});
+    Stroke& s = *f.find_stroke(id);
+    s.softness = 0.0f;
+    // Live only from its first key to its last.
+    CHECK(s.live_at(10) && !s.live_at(9) && !s.live_at(11));
+    s.set(20, {{12, 8}});
+    CHECK(s.live_at(15) && !s.live_at(21));
+    CHECK(near(s.at(15)[0].x, 10.0f, 1e-5f));
+
+    // Hard-edged coverage: full inside the radius, none outside.
+    const auto c = stroke_coverage(s, 10, 16, 16, 1.0f);
+    CHECK(c[8 * 16 + 8] == 1.0f && c[8 * 16 + 9] == 1.0f && c[8 * 16 + 12] == 0.0f && c[0] == 0.0f);
+    // A line covers its length. (Pixel centres are at half pixels, so pixel
+    // 13's is past the line's end at 13, and only partly covered.)
+    const int line = f.add_stroke(0, PaintMode::kOut, 1.0f, {{2, 2}, {13, 2}});
+    f.find_stroke(line)->softness = 0.0f;
+    const auto l = stroke_coverage(*f.find_stroke(line), 0, 16, 16, 1.0f);
+    CHECK(l[2 * 16 + 2] == 1.0f && l[2 * 16 + 7] == 1.0f && l[2 * 16 + 12] == 1.0f && l[5 * 16 + 7] == 0.0f);
+    CHECK(l[2 * 16 + 13] > 0.0f && l[2 * 16 + 13] < 1.0f);
+
+    // Folded: out alone takes alpha to 0 under it; in after it brings it
+    // back to 1; out after that takes it away again.
+    Fixes p;
+    auto stroke = [&](PaintMode mode) {
+        const int sid = p.add_stroke(0, mode, 4.0f, {{8, 8}});
+        p.find_stroke(sid)->softness = 0.0f;
+    };
+    auto at_centre = [&](float alpha) {
+        const auto m = fixes_mask(p, 0, 16, 16, 1.0f);
+        const std::size_t i = (8 * 16 + 8) * 4;
+        return (m[i + 1] / 255.0f * alpha + m[i + 2] / 255.0f) * (m[i] / 255.0f);
+    };
+    stroke(PaintMode::kOut);
+    CHECK(near(at_centre(1.0f), 0.0f, 1e-3f) && near(at_centre(0.4f), 0.0f, 1e-3f));
+    stroke(PaintMode::kIn);
+    CHECK(near(at_centre(0.0f), 1.0f, 1e-3f) && near(at_centre(0.4f), 1.0f, 1e-3f));
+    stroke(PaintMode::kOut);
+    CHECK(near(at_centre(1.0f), 0.0f, 1e-3f));
+    // Away from every stroke, the matte is as it was.
+    const auto m = fixes_mask(p, 0, 16, 16, 1.0f);
+    CHECK(m[0] == 255 && m[1] == 255 && m[2] == 0);
+    // Not live on this frame: no mask at all.
+    CHECK(fixes_mask(p, 5, 16, 16, 1.0f).empty());
+    // Garbage still applies over paint: in, but outside the shape, is out.
+    p.add_garbage(0, square(0, 0, 4));
+    CHECK(near(at_centre(1.0f), 0.0f, 1e-3f));
+}
+
+void test_strokes_file() {
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "photoscoping_test_strokes.json").string();
+    Fixes f;
+    const int id = f.add_stroke(4, PaintMode::kIn, 12.5f, {{1, 2}, {3, 4}});
+    f.find_stroke(id)->set(9, {{5, 6}, {7, 8}});
+    std::string error;
+    CHECK(f.save(path, &error));
+    Fixes back;
+    CHECK(back.load(path, &error));
+    const Stroke* s = back.find_stroke(id);
+    CHECK(s && s->mode == PaintMode::kIn && s->radius == 12.5f && s->keys.size() == 2);
+    CHECK(s && s->at(9)[1] == (Point{7, 8}));
+    CHECK(back.key_frames().size() == 2);
+    std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
@@ -144,6 +211,8 @@ int main() {
     test_file();
     test_history();
     test_mask();
+    test_strokes();
+    test_strokes_file();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);
         return 1;
