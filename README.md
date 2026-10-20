@@ -2,9 +2,9 @@
 
 An app for photoscoping live action video footage.
 
-Native C++20 on SDL3 (SDL_GPU) with a bespoke widget set, and an LGPL,
-decode-only FFmpeg for reading camera originals and intermediates (ProRes,
-DNxHD/DNxHR, CineForm, H.264/HEVC in MOV, MXF and MP4).
+Native C++20 on SDL3 (SDL_GPU) with a bespoke widget set, and an LGPL FFmpeg
+for reading camera originals and intermediates (ProRes, DNxHD/DNxHR,
+CineForm, H.264/HEVC in MOV, MXF and MP4) and writing exports.
 
 ## Building
 
@@ -13,7 +13,7 @@ DNxHD/DNxHR, CineForm, H.264/HEVC in MOV, MXF and MP4).
     ./clean.sh            # remove build/ (./clean.sh --all also drops vendor builds)
 
 The first build compiles pinned versions of SDL3, SDL3_image, freetype,
-HarfBuzz + SDL3_ttf and FFmpeg from source into `vendor/`, which takes several
+HarfBuzz + SDL3_ttf, libvpx and FFmpeg from source into `vendor/`, which takes several
 minutes. Later builds skip them.
 
 ## Running
@@ -86,6 +86,21 @@ with closed-form matting, and writes the box as a 16-bit PNG in
 viewer blends it into the matte, feathered in from the box's edge, before
 garbage mattes and paint apply. Moving a box only re-mattes the frames it
 moved on. `--rematte-clip DIR` runs it headless.
+
+File > Export Subject writes the matted subject with its alpha: ProRes 4444
+(Command-E, the default), VP9 in WebM, or a folder of 16-bit RGBA PNGs. File >
+Export Matte writes the matte alone, white on black: ProRes 422, ProRes 422
+LT, HEVC (10-bit) or H.264. Exporting needs every frame matted; it runs in the
+background, with its progress on the card and the pill to stop it. Each frame
+is the matte with its re-matte patches blended in -- made on the way, if they
+were not -- and the garbage mattes and paint applied, at full resolution. The
+subject's colour is estimated free of the wall's spill and written with
+straight alpha, encoded for Rec.709 the way the footage was read, so where
+the subject is solid it comes out as it went in. Everything is tagged Rec.709,
+video range. HEVC and H.264 use the Mac's own encoders; ProRes is FFmpeg's,
+VP9 libvpx's. A stopped export leaves only a `.partial` file.
+`--export-clip PATH --export-format ID --mattes DIR` runs it headless
+(`--export-range A:B` for part of the clip).
 
 The viewer shows a matte four ways: the footage, the matte, the matted subject
 over a checkerboard, or the footage washed purple wherever the matte drops it.

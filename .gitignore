@@ -19,6 +19,7 @@ build/
 vendor/.build/
 vendor/.cache/
 vendor/ffmpeg/
+vendor/libvpx/
 vendor/freetype/
 vendor/sdl3/
 vendor/sdl3_image/

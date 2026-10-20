@@ -76,6 +76,10 @@ public:
     // Estimated from duration and rate; containers do not always say.
     std::int64_t frame_count() const { return frame_count_; }
     double frame_rate() const { return frame_rate_; }
+    // The rate exactly, as the file has it -- 24000/1001, not 23.976 -- for
+    // writing it again.
+    int rate_num() const { return rate_num_; }
+    int rate_den() const { return rate_den_; }
     int width() const { return width_; }
     int height() const { return height_; }
     bool hardware_decoding() const { return hw_device_ != nullptr; }
@@ -97,6 +101,7 @@ private:
 
     int width_ = 0, height_ = 0;
     double frame_rate_ = 0.0;
+    int rate_num_ = 0, rate_den_ = 1;
     std::int64_t frame_count_ = 0;
     std::int64_t frame_index_ = -1;
     std::int64_t start_pts_ = 0;

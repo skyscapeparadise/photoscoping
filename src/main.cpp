@@ -1,5 +1,4 @@
 #include <SDL3/SDL.h>
-#include <SDL3_image/SDL_image.h>
 
 #include <cmath>
 #include <cstdio>
@@ -11,6 +10,8 @@
 
 #include "app/editor_app.hpp"
 #include "color/cube_lut.hpp"
+#include "export/clip_export.hpp"
+#include "media/export_format.hpp"
 #include "fixes/fixes.hpp"
 #include "fixes/rematte.hpp"
 #include "gpu/gpu_context.hpp"
@@ -35,6 +36,10 @@ struct Options {
     std::string matte;
     std::string matte_clip;
     std::string rematte_clip;
+    std::string export_path_out;
+    ps::media::ExportFormat export_format = ps::media::ExportFormat::kProRes4444;
+    std::int64_t export_first = 0;
+    std::int64_t export_last = -1;
     std::string matte_stage = "subject";
     std::string models = "models";
     bool model_cpu = false;
@@ -71,6 +76,14 @@ void usage() {
         "                 make every patch the re-matte boxes in DIR/<clip>_fixes.json\n"
         "                 want, as 16-bit PNGs in DIR/<clip>_rematte/; patches already\n"
         "                 there are skipped\n"
+        "  --export-clip PATH\n"
+        "                 export the matted clip, its fixes applied, to PATH; reads\n"
+        "                 its mattes, patches and fixes from --mattes DIR\n"
+        "  --export-format prores4444|vp9|png|matte-prores422|matte-prores422lt|\n"
+        "                 matte-hevc|matte-h264  (default prores4444; png writes\n"
+        "                 a folder of 16-bit RGBA frames)\n"
+        "  --export-range A:B\n"
+        "                 only frames A to B, inclusive\n"
         "  --models DIR   where tools/export_matting_model.py wrote the models\n"
         "                 (default: models)\n"
         "  --model-cpu    run the models on the CPU, not Core ML\n"
@@ -120,6 +133,20 @@ std::optional<Options> parse_args(int argc, char** argv) {
             const char* v = value();
             if (!v) return std::nullopt;
             o.matte_clip = v;
+        } else if (a == "--export-clip") {
+            const char* v = value();
+            if (!v) return std::nullopt;
+            o.export_path_out = v;
+        } else if (a == "--export-format") {
+            const char* v = value();
+            if (!v || !ps::media::parse_export_format(v, &o.export_format)) return std::nullopt;
+        } else if (a == "--export-range") {
+            const char* v = value();
+            long long first = 0, last = 0;
+            if (!v || std::sscanf(v, "%lld:%lld", &first, &last) != 2 || first < 0 || last < first)
+                return std::nullopt;
+            o.export_first = first;
+            o.export_last = last;
         } else if (a == "--rematte-clip") {
             const char* v = value();
             if (!v) return std::nullopt;
@@ -163,7 +190,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
     }
     if (!o.export_path.empty()) o.probe = true;
     if ((o.probe || o.bench || o.pipe || !o.matte.empty() || !o.matte_clip.empty() ||
-         !o.rematte_clip.empty()) &&
+         !o.rematte_clip.empty() || !o.export_path_out.empty()) &&
         o.clip.empty())
         return std::nullopt;
     return o;
@@ -497,22 +524,8 @@ bool run_rematte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::Inges
 
         // The matte the patch is to sit in: the one on disk, which is what
         // the viewer blends it over, or failing that the coarse model's.
-        std::vector<float> base;
-        char name[16];
-        std::snprintf(name, sizeof name, "%06lld.png", static_cast<long long>(frame_index));
-        if (SDL_Surface* file = IMG_Load((mattes / name).string().c_str())) {
-            SDL_Surface* rgba = SDL_ConvertSurface(file, SDL_PIXELFORMAT_ABGR8888);
-            SDL_DestroySurface(file);
-            if (rgba && rgba->w == frame.width && rgba->h == frame.height) {
-                base.resize(static_cast<std::size_t>(frame.width) * frame.height);
-                for (int y = 0; y < frame.height; ++y) {
-                    const auto* row = static_cast<const std::uint8_t*>(rgba->pixels) + y * rgba->pitch;
-                    for (int x = 0; x < frame.width; ++x)
-                        base[static_cast<std::size_t>(y) * frame.width + x] = row[x * 4] / 255.0f;
-                }
-            }
-            if (rgba) SDL_DestroySurface(rgba);
-        }
+        std::vector<float> base =
+            ps::exporting::read_matte(o.rematte_clip, stem, frame_index, frame.width, frame.height);
         if (base.empty()) base = stack.coarse(frame, &error);
         if (base.empty()) {
             std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(frame_index), error.c_str());
@@ -521,38 +534,21 @@ bool run_rematte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::Inges
 
         for (; n < jobs.size() && jobs[n].frame == frame_index; ++n) {
             const ps::fixes::PixelRect& box = jobs[n].box;
-            const ps::fixes::RematteCrop c = ps::fixes::rematte_crop(box, frame.width, frame.height);
-            const std::vector<float> alpha =
-                stack.closer(frame, base, c.crop.x0, c.crop.y0, c.crop.width(), c.crop.height(),
-                             c.wide, &error);
-            if (alpha.empty()) {
+            float detail = 1.0f;
+            const std::vector<float> patch =
+                ps::exporting::make_patch(stack, frame, base, box, &detail, &error);
+            if (patch.empty() ||
+                !ps::exporting::write_patch((out / ps::fixes::patch_name(frame_index, box)).string(),
+                                            patch, box, &error)) {
                 std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(frame_index),
                              error.c_str());
-                return false;
-            }
-            std::vector<float> patch(static_cast<std::size_t>(box.width()) * box.height());
-            for (int y = 0; y < box.height(); ++y)
-                for (int x = 0; x < box.width(); ++x)
-                    patch[static_cast<std::size_t>(y) * box.width() + x] =
-                        alpha[static_cast<std::size_t>(box.y0 - c.crop.y0 + y) * c.crop.width() +
-                              (box.x0 - c.crop.x0 + x)];
-            const fs::path final_path = out / ps::fixes::patch_name(frame_index, box);
-            fs::path partial = final_path;
-            partial.replace_extension(".partial.png");
-            if (!ps::matting::write_png16(partial.string(), patch, box.width(), box.height())) {
-                std::fprintf(stderr, "cannot write %s\n", partial.c_str());
-                return false;
-            }
-            fs::rename(partial, final_path, ec);
-            if (ec) {
-                std::fprintf(stderr, "cannot rename %s: %s\n", partial.c_str(), ec.message().c_str());
                 return false;
             }
             ++made;
             const double per = (SDL_GetTicksNS() - started) / 1e9 / static_cast<double>(made);
             std::printf("  %zu/%zu  frame %lld  %dx%d at %.1fx  %.2f s  eta %.1f min\n", made,
                         jobs.size(), static_cast<long long>(frame_index), box.width(), box.height(),
-                        c.detail, (SDL_GetTicksNS() - t) / 1e9,
+                        detail, (SDL_GetTicksNS() - t) / 1e9,
                         per * static_cast<double>(jobs.size() - made) / 60.0);
             std::fflush(stdout);
         }
@@ -595,7 +591,8 @@ int main(int argc, char** argv) {
     // a worker thread, the same way it opens one dropped on it later.
     const bool headless =
         options->probe || options->bench || options->pipe || !options->matte.empty() ||
-        !options->matte_clip.empty() || !options->rematte_clip.empty();
+        !options->matte_clip.empty() || !options->rematte_clip.empty() ||
+        !options->export_path_out.empty();
     ps::media::VideoDecoder decoder;
     if (headless) {
         if (!decoder.open(options->clip, !options->software)) return 1;
@@ -638,6 +635,23 @@ int main(int argc, char** argv) {
 
     if (!options->matte_clip.empty()) {
         const int status = run_matte_clip(*options, gpu, ingest, decoder, transform) ? 0 : 1;
+        ingest.destroy();
+        gpu.destroy();
+        SDL_Quit();
+        return status;
+    }
+
+    if (!options->export_path_out.empty()) {
+        ps::exporting::ExportRequest request;
+        request.clip = options->clip;
+        request.render_dir = options->mattes;
+        request.out = options->export_path_out;
+        request.format = options->export_format;
+        request.models = options->models;
+        request.model_cpu = options->model_cpu;
+        request.first = options->export_first;
+        request.last = options->export_last;
+        const int status = ps::exporting::run_export(request, gpu, ingest, decoder, transform) ? 0 : 1;
         ingest.destroy();
         gpu.destroy();
         SDL_Quit();

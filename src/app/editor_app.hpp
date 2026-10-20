@@ -84,6 +84,11 @@ private:
     // extension, a clip otherwise.
     void open_path(const std::string& path);
     void show_open_dialog();
+    // File > Export: asks where, then exports in the background. Only once
+    // every frame of the clip is matted, and nothing else is running.
+    bool can_export() const;
+    void show_export_dialog(int format_index);
+    void start_export(const std::string& path, int format_index);
     // Adds the File menu once there is a menu bar to add it to.
     void install_menu();
     void set_playing(bool playing);
@@ -193,6 +198,13 @@ private:
     // The SDL event a path chosen in the open dialog arrives as: the dialog
     // answers on a thread of its own.
     Uint32 open_event_ = 0;
+    // A path chosen in the export dialog, likewise; the format rides along.
+    Uint32 export_event_ = 0;
+    // What the last export came to, for the card: where it went, or that it
+    // failed.
+    std::string export_status_ = "none";
+    std::string export_to_;
+    int pending_export_format_ = 0;
     bool file_menu_ = false;
 };
 

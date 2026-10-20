@@ -35,6 +35,13 @@ std::vector<std::uint8_t> garbage_mask(const Fixes& fixes, std::int64_t frame, i
 std::vector<std::uint8_t> fixes_mask(const Fixes& fixes, std::int64_t frame, int width, int height,
                                      float scale);
 
+// What fixes_mask() says, done to a matte at the frame's own size, in float:
+// for export, where the matte is the product and half a pixel's precision is
+// not enough. The same order as the viewer -- strokes in turn, then the
+// garbage mattes.
+void apply_fixes(const Fixes& fixes, std::int64_t frame, std::vector<float>& alpha, int width,
+                 int height);
+
 // A stroke's coverage at `frame`, 0..1, width x height at `scale`: the union
 // of capsules along its points, the outer `softness` of the radius fading.
 // Exposed for the tests.

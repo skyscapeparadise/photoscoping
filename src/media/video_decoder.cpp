@@ -97,6 +97,8 @@ bool VideoDecoder::open(const std::string& path, bool hardware) {
     height_ = codec_->height;
     const AVRational rate = stream->avg_frame_rate.num ? stream->avg_frame_rate : stream->r_frame_rate;
     frame_rate_ = rate.num ? av_q2d(rate) : 0.0;
+    rate_num_ = rate.num;
+    rate_den_ = rate.num ? rate.den : 1;
     start_pts_ = stream->start_time != AV_NOPTS_VALUE ? stream->start_time : 0;
     if (stream->nb_frames > 0) {
         frame_count_ = stream->nb_frames;

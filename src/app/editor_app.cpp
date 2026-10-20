@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <iterator>
 #include <string>
 #include <unordered_map>
 
@@ -12,6 +13,7 @@
 #include "app/tracking_ticker.hpp"
 #include "editor/theme.hpp"
 #include "fixes/mask.hpp"
+#include "media/export_format.hpp"
 
 namespace ps::app {
 
@@ -123,6 +125,7 @@ editor::ClipInfo clip_info(const std::string& name, const media::VideoDecoder& d
     // Filled in from what has been matted.
     info.rows.emplace_back("matte", "none");
     info.rows.emplace_back("re-matte", "none");
+    info.rows.emplace_back("export", "none");
     return info;
 }
 
@@ -190,8 +193,9 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options op
 
     // A worker that has made a frame wakes the main loop, which may be
     // asleep on its events, to come and get it.
-    open_event_ = SDL_RegisterEvents(2);
+    open_event_ = SDL_RegisterEvents(3);
     const Uint32 frame_event = open_event_ + 1;
+    export_event_ = open_event_ + 2;
     for (FrameSource* source : {static_cast<FrameSource*>(&clip_),
                                 static_cast<FrameSource*>(&matte_),
                                 static_cast<FrameSource*>(&subject_),
@@ -319,8 +323,12 @@ void EditorApp::open_path(const std::string& path) {
 void EditorApp::install_menu() {
 #if defined(SDL_PLATFORM_APPLE)
     if (!file_menu_)
-        file_menu_ = install_file_menu(
-            [](void* self) { static_cast<EditorApp*>(self)->show_open_dialog(); }, this);
+        file_menu_ = install_file_menu(FileMenuActions{
+            this,
+            [](void* self) { static_cast<EditorApp*>(self)->show_open_dialog(); },
+            [](void* self, int format) { static_cast<EditorApp*>(self)->show_export_dialog(format); },
+            [](void* self) { return static_cast<EditorApp*>(self)->can_export(); },
+        });
 #endif
 }
 
@@ -340,6 +348,70 @@ void EditorApp::show_open_dialog() {
             SDL_PushEvent(&event);
         },
         this, gpu_->window(), kFilters, 2, nullptr, /*allow_many=*/false);
+}
+
+bool EditorApp::can_export() const {
+    return clip_.is_open() && job_.available() && !job_.running() && clip_.frame_count() > 0 &&
+           frames_.done_count() >= clip_.frame_count();
+}
+
+void EditorApp::show_export_dialog(int format_index) {
+    if (!can_export() || format_index < 0 ||
+        format_index >= static_cast<int>(std::size(media::kExportFormats)))
+        return;
+    const media::ExportFormatInfo& info = media::kExportFormats[format_index];
+    // Suggested beside the clip, named for it and what it holds -- with a
+    // space, not the underscore the app's own renders use, so the suggestion
+    // is never one of them.
+    const std::string name = clip_name_ + (info.subject ? " subject" : " matte") + info.extension;
+    const std::string where =
+        (std::filesystem::absolute(clip_.path()).parent_path() / name).string();
+    // One filter, the format's own; a PNG sequence is a folder, and has none.
+    static SDL_DialogFileFilter filter;
+    static std::string pattern;
+    pattern = info.extension[0] ? info.extension + 1 : "";
+    filter = {info.label, pattern.c_str()};
+    pending_export_format_ = format_index;
+    SDL_ShowSaveFileDialog(
+        [](void* self, const char* const* files, int) {
+            if (!files || !files[0]) return;  // an error, or cancelled
+            auto* app = static_cast<EditorApp*>(self);
+            SDL_Event event = {};
+            event.type = app->export_event_;
+            event.user.data1 = SDL_strdup(files[0]);
+            event.user.code = app->pending_export_format_;
+            SDL_PushEvent(&event);
+        },
+        this, gpu_->window(), pattern.empty() ? nullptr : &filter, pattern.empty() ? 0 : 1,
+        where.c_str());
+}
+
+void EditorApp::start_export(const std::string& chosen, int format_index) {
+    if (!can_export()) return;
+    const media::ExportFormatInfo& info = media::kExportFormats[format_index];
+    // The format's extension, whatever was typed.
+    std::filesystem::path path(chosen);
+    if (info.extension[0]) path.replace_extension(info.extension);
+    // Never over the app's own renders, or the clip itself: the save dialog
+    // would ask before replacing them, but the answer would still lose them.
+    std::error_code ec;
+    for (const std::string& own : {render_path("_matte.mp4"), render_path("_comp.mp4"),
+                                   render_path("_mattes"), render_path("_rematte"),
+                                   render_path("_fixes.json"), clip_.path()}) {
+        if (std::filesystem::equivalent(path, own, ec)) {
+            SDL_Log("not exporting over %s, which the app reads", own.c_str());
+            export_status_ = "not over the app's own files";
+            refresh_matte_ui();
+            return;
+        }
+    }
+    if (job_.start(MatteJob::Kind::kExport, clip_.path(), options_.lut_path, options_.render_dir,
+                   clip_name_, path.string(), info.id)) {
+        job_started_ns_ = SDL_GetTicksNS();
+        export_to_ = path.filename().string();
+        export_status_ = "starting";
+    }
+    refresh_matte_ui();
 }
 
 bool EditorApp::set_view(const std::string& name) {
@@ -416,7 +488,7 @@ void EditorApp::refresh_matte_ui() {
         source_ == MatteSource::kVideos && subject_.is_open());
 
     std::string row = "none";
-    if (job_.running()) {
+    if (job_.running() && job_.kind() == MatteJob::Kind::kMatte) {
         row = std::to_string(done) + " of " + std::to_string(total);
         const double elapsed = (SDL_GetTicksNS() - job_started_ns_) / 1e9;
         const std::int64_t made = done - done_at_start_;
@@ -449,8 +521,20 @@ void EditorApp::refresh_matte_ui() {
     }
     inspector->set_row("re-matte", rematte_row);
 
+    const bool exporting = job_.running() && job_.kind() == MatteJob::Kind::kExport;
+    std::string export_row = export_status_;
+    std::int64_t exported = 0, export_total = 0;
+    if (exporting && job_.export_progress(&exported, &export_total) && exported > 0) {
+        const double elapsed = (SDL_GetTicksNS() - job_started_ns_) / 1e9;
+        export_row = std::to_string(exported) + " of " + std::to_string(export_total) +
+                     " \xC2\xB7 " + time_left((export_total - exported) * elapsed / exported);
+    }
+    inspector->set_row("export", export_row);
+
     const std::size_t to_make = patches_.frames_to_make();
-    if (root_.tool() == editor::Tool::kRematte && !(job_.running() && !rematting)) {
+    if (exporting) {
+        inspector->set_action("stop exporting", true);
+    } else if (root_.tool() == editor::Tool::kRematte && !(job_.running() && !rematting)) {
         if (!clip_.is_open() || !job_.available())
             inspector->set_action("re-matte", false);
         else if (rematting)
@@ -477,6 +561,8 @@ void EditorApp::refresh_matte_ui() {
 
 void EditorApp::toggle_job() {
     if (job_.running()) {
+        // A stopped export leaves its .partial behind, never the file itself.
+        if (job_.kind() == MatteJob::Kind::kExport) export_status_ = "stopped";
         job_.stop();
     } else if (clip_.is_open() && root_.tool() == editor::Tool::kRematte) {
         if (job_.start(MatteJob::Kind::kRematte, clip_.path(), options_.lut_path,
@@ -511,14 +597,17 @@ void EditorApp::poll_job() {
     // Patches the same way: a rescan that finds new ones refreshes the frame
     // on screen if they are its.
     const bool rematting = job_.kind() == MatteJob::Kind::kRematte;
-    if (rematting) patches_.rescan();
+    const bool exporting = job_.kind() == MatteJob::Kind::kExport;
+    if (rematting || exporting) patches_.rescan();
     else if (frames_.rescan() && frames_.matted(shown_) && frames_.shown() != shown_) frames_.refresh();
     bool succeeded = false;
     if (job_.poll_finished(&succeeded)) {
-        if (rematting) patches_.rescan();
+        if (rematting || exporting) patches_.rescan();
+        if (exporting) export_status_ = succeeded ? export_to_ : "failed; see the log";
         if (!succeeded)
-            SDL_Log("the %s stopped short; see %s", rematting ? "re-matte" : "matting",
-                    render_path(rematting ? "_rematte.log" : "_matte.log").c_str());
+            SDL_Log("the %s stopped short; see %s",
+                    exporting ? "export" : rematting ? "re-matte" : "matting",
+                    job_.log_path().c_str());
         // Finished, the new videos are in place and newer than the frames.
         choose_matte_source();
     }
@@ -558,6 +647,12 @@ void EditorApp::seek(std::int64_t frame) {
 }
 
 void EditorApp::handle(const SDL_Event& event) {
+    if (event.type == export_event_) {
+        char* path = static_cast<char*>(event.user.data1);
+        if (path) start_export(path, event.user.code);
+        SDL_free(path);
+        return;
+    }
     if (event.type == open_event_) {
         char* path = static_cast<char*>(event.user.data1);
         if (path) open_path(path);

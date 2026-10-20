@@ -71,6 +71,17 @@ float rematte_weight(const PixelRect& box, int x, int y) {
     return t * t * (3.0f - 2.0f * t);
 }
 
+void blend_patch(std::vector<float>& alpha, int frame_w, const PixelRect& box,
+                 const std::vector<float>& patch) {
+    for (int y = box.y0; y < box.y1; ++y)
+        for (int x = box.x0; x < box.x1; ++x) {
+            const float w = rematte_weight(box, x, y);
+            float& a = alpha[static_cast<std::size_t>(y) * frame_w + x];
+            const float p = patch[static_cast<std::size_t>(y - box.y0) * box.width() + (x - box.x0)];
+            a = a * (1.0f - w) + p * w;
+        }
+}
+
 std::string patch_name(std::int64_t frame, const PixelRect& box) {
     char name[96];
     std::snprintf(name, sizeof name, "%06lld_%d_%d_%d_%d.png", static_cast<long long>(frame),

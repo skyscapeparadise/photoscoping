@@ -112,6 +112,7 @@ target_include_directories(photoscoping_fixes PUBLIC src "${CMAKE_CURRENT_SOURCE
 # Decoding: FFmpeg, no GPU.
 add_library(photoscoping_media STATIC
     src/media/video_decoder.cpp
+    src/media/video_encoder.cpp
     src/media/frame_worker.cpp
 )
 target_include_directories(photoscoping_media PUBLIC src)
@@ -121,6 +122,7 @@ target_link_libraries(photoscoping_media PUBLIC
     PkgConfig::AVCODEC
     PkgConfig::AVFORMAT
     PkgConfig::AVUTIL
+    PkgConfig::SWSCALE
 )
 
 # The matting stack, natively: preparing a frame for the model and running it.
@@ -207,7 +209,7 @@ target_link_libraries(photoscoping_ui PUBLIC
 add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep_stream.cpp
                             src/app/matte_frames.cpp src/app/matte_job.cpp
                             src/app/clip_frames.cpp src/app/mask_texture.cpp
-                            src/app/rematte_patches.cpp)
+                            src/app/rematte_patches.cpp src/export/clip_export.cpp)
 target_link_libraries(photoscoping PRIVATE photoscoping_ui photoscoping_matting photoscoping_fixes)
 
 if(APPLE)
@@ -226,3 +228,7 @@ add_test(NAME color COMMAND color_tests)
 add_executable(fixes_tests tests/test_fixes.cpp)
 target_link_libraries(fixes_tests PRIVATE photoscoping_fixes)
 add_test(NAME fixes COMMAND fixes_tests)
+
+add_executable(export_tests tests/test_export.cpp)
+target_link_libraries(export_tests PRIVATE photoscoping_matting photoscoping_media)
+add_test(NAME export COMMAND export_tests)

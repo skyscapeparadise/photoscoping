@@ -2,6 +2,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <cstdint>
 #include <string>
 
 namespace ps::app {
@@ -30,15 +31,22 @@ public:
     void locate();
     bool available() const { return !app_.empty() && !models_.empty(); }
 
-    // What a run makes: the whole clip's mattes (--matte-clip), or the
-    // patches its re-matte boxes want (--rematte-clip). One at a time -- both
-    // want the whole GPU.
-    enum class Kind { kMatte, kRematte };
+    // What a run makes: the whole clip's mattes (--matte-clip), the patches
+    // its re-matte boxes want (--rematte-clip), or an export of it
+    // (--export-clip). One at a time -- they all want the whole GPU.
+    enum class Kind { kMatte, kRematte, kExport };
 
     // `lut` may be empty. Output goes under `out`, where the viewer reads it;
     // the run's own output goes to a log there.
+    // For an export, `out` is where the clip's renders are, and `export_to`
+    // and `format` (an ExportFormat's id) say what to write where.
     bool start(Kind kind, const std::string& clip, const std::string& lut, const std::string& out,
-               const std::string& name);
+               const std::string& name, const std::string& export_to = {},
+               const std::string& format = {});
+    // How far an export has got, from the last progress line in its log.
+    // False until it has written one.
+    bool export_progress(std::int64_t* done, std::int64_t* total) const;
+    const std::string& log_path() const { return log_path_; }
     Kind kind() const { return kind_; }
     // Stops the run and waits for it to be gone.
     void stop();
@@ -53,6 +61,7 @@ private:
     std::string models_;
     SDL_Process* process_ = nullptr;
     Kind kind_ = Kind::kMatte;
+    std::string log_path_;
     SDL_IOStream* log_ = nullptr;
 };
 

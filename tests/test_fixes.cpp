@@ -256,6 +256,39 @@ void test_rematte() {
     std::filesystem::remove(path);
 }
 
+void test_apply_fixes() {
+    // At full size, in float, the same as the viewer's mask: strokes in
+    // turn, then the garbage mattes.
+    Fixes f;
+    f.add_garbage(0, {{10, 10}, {90, 10}, {90, 90}, {10, 90}});
+    f.add_stroke(0, PaintMode::kOut, 8.0f, {{30, 50}, {70, 50}});
+    f.add_stroke(0, PaintMode::kIn, 6.0f, {{50, 30}, {50, 70}});
+    std::vector<float> alpha(100 * 100, 0.6f);
+    apply_fixes(f, 0, alpha, 100, 100);
+    auto at = [&](int x, int y) { return alpha[static_cast<std::size_t>(y) * 100 + x]; };
+    CHECK(at(5, 5) == 0.0f);                     // outside the garbage matte
+    CHECK(std::fabs(at(20, 20) - 0.6f) < 1e-6f);  // untouched
+    CHECK(at(35, 50) < 1e-6f);                   // painted out
+    CHECK(std::fabs(at(50, 50) - 1.0f) < 1e-6f);  // painted back in, last
+    CHECK(std::fabs(at(50, 35) - 1.0f) < 1e-6f);  // painted in
+    // The viewer's mask says the same, to its 8 bits.
+    const std::vector<std::uint8_t> mask = fixes_mask(f, 0, 100, 100, 1.0f);
+    for (int i : {5 * 100 + 5, 20 * 100 + 20, 50 * 100 + 35, 50 * 100 + 50}) {
+        const float g = mask[i * 4] / 255.0f, m = mask[i * 4 + 1] / 255.0f, k = mask[i * 4 + 2] / 255.0f;
+        CHECK(std::fabs((0.6f * m + k) * g - alpha[i]) < 0.01f);
+    }
+}
+
+void test_blend_patch() {
+    // A patch over a matte: all of it a feather in, none at its edge.
+    const PixelRect box{20, 20, 80, 80};
+    std::vector<float> alpha(100 * 100, 0.0f);
+    blend_patch(alpha, 100, box, std::vector<float>(60 * 60, 1.0f));
+    CHECK(alpha[50 * 100 + 50] == 1.0f);
+    CHECK(alpha[50 * 100 + 20] < 0.05f);
+    CHECK(alpha[10 * 100 + 10] == 0.0f);
+}
+
 }  // namespace
 
 int main() {
@@ -266,6 +299,8 @@ int main() {
     test_strokes();
     test_strokes_file();
     test_rematte();
+    test_apply_fixes();
+    test_blend_patch();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);
         return 1;

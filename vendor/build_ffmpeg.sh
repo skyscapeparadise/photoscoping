@@ -1,5 +1,6 @@
 #!/bin/bash
-# build_ffmpeg.sh - Build a minimal, LGPL, decode-only ffmpeg for photoscoping.
+# build_ffmpeg.sh - Build a minimal, LGPL ffmpeg for photoscoping: decoders for
+# the footage, and encoders for what photoscoping exports.
 #
 # Why vendor instead of using Homebrew's ffmpeg:
 #   * License. Homebrew builds with --enable-gpl --enable-version3 (it wants
@@ -7,8 +8,17 @@
 #     those into photoscoping would relicense the whole app as GPLv3, which
 #     conflicts with photoscoping's LGPL-2.1. This build is LGPL-2.1.
 #   * Size. Homebrew's ffmpeg tree costs ~33MB in the app bundle, most of it
-#     encoders (x265 alone is 7MB) that photoscoping never calls. It only
-#     ever decodes.
+#     encoders (x265 alone is 7MB) that photoscoping never calls. It decodes
+#     widely and encodes only its export formats.
+#
+# The export encoders, all compatible with LGPL-2.1:
+#   * prores_ks, FFmpeg's own ProRes: 4444 with alpha for the subject, 422
+#     and 422 LT for the matte.
+#   * libvpx_vp9, from vendor/build_libvpx.sh (BSD, linked statically): VP9
+#     with alpha, in WebM.
+#   * h264_videotoolbox and hevc_videotoolbox: the Mac's own hardware
+#     encoders, for the matte. No x264/x265 -- both GPL. (Other platforms
+#     will need their own system encoders here.)
 #
 # Audio decoders are enabled as well as video: scrubbing footage without its
 # sync sound is half the job. Camera originals carry PCM far more often than
@@ -103,7 +113,15 @@ cd "${SRC_DIR}"
 # returns nothing, FFmpeg quietly negotiates a software pixel format, and the
 # decoder runs on the CPU while looking for all the world like it is
 # accelerated. Hence the explicit --enable-hwaccel list.
-echo "configuring (LGPL, decode-only)..."
+# libvpx comes from its own vendored build, found through its pkg-config
+# file; it is static, so it ends up inside libavcodec.
+if [ ! -f "${SCRIPT_DIR}/libvpx/lib/pkgconfig/vpx.pc" ]; then
+    echo "ERROR: vendored libvpx missing; run vendor/build_libvpx.sh first"
+    exit 1
+fi
+export PKG_CONFIG_PATH="${SCRIPT_DIR}/libvpx/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+
+echo "configuring (LGPL)..."
 ./configure \
     --prefix="${PREFIX}" \
     --disable-gpl \
@@ -135,6 +153,9 @@ echo "configuring (LGPL, decode-only)..."
     --enable-demuxer=wav,mp3,ogg,flac,aac,ac3,w64,aiff,caf \
     --enable-hwaccel=h264_videotoolbox,hevc_videotoolbox,prores_videotoolbox,vp9_videotoolbox,av1_videotoolbox,mpeg4_videotoolbox \
     --enable-protocol=file \
+    --enable-libvpx \
+    --enable-encoder=prores_ks,libvpx_vp9,h264_videotoolbox,hevc_videotoolbox \
+    --enable-muxer=mov,mp4,webm \
     --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,extract_extradata,vp9_superframe,av1_frame_split,prores_metadata
 
 echo "compiling (this takes a few minutes)..."
@@ -158,7 +179,6 @@ These libraries are dynamically linked, so they can be replaced with a
 modified build by substituting the dylibs in photoscoping.app/Contents/Frameworks/.
 EOF
 
-echo "${STAMP_VALUE}" > "${STAMP}"
 
 echo
 # The configure line is long and a typo in it fails silently -- the library
@@ -186,6 +206,13 @@ int main(void) {
         if (!c) { printf("  MISSING decoder id %d\n", (int)want[i]); bad = 1; }
     }
     if (!bad) printf("  all required video and audio decoders present\n");
+    /* And the export encoders, by name: the four of them are what the
+       export formats are made of. */
+    const char *enc[] = {"prores_ks", "libvpx-vp9", "h264_videotoolbox", "hevc_videotoolbox"};
+    for (unsigned i = 0; i < sizeof(enc)/sizeof(*enc); ++i) {
+        if (!avcodec_find_encoder_by_name(enc[i])) { printf("  MISSING encoder %s\n", enc[i]); bad = 1; }
+    }
+    if (!bad) printf("  all export encoders present\n");
     return bad;
 }
 EOF
@@ -267,6 +294,10 @@ if [ -n "${X11LEAK}" ]; then
     exit 1
 fi
 echo "  clean -- no X11"
+
+# Stamped last, once every check has passed: a build that failed one is
+# built again next time rather than taken as done.
+echo "${STAMP_VALUE}" > "${STAMP}"
 
 echo
 echo "vendored ffmpeg ${FFMPEG_VERSION} built at ${PREFIX}"

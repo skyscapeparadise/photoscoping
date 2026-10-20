@@ -107,6 +107,23 @@ std::vector<float> stroke_coverage(const Stroke& stroke, std::int64_t frame, int
     return cover;
 }
 
+void apply_fixes(const Fixes& fixes, std::int64_t frame, std::vector<float>& alpha, int width,
+                 int height) {
+    const std::size_t pixels = static_cast<std::size_t>(width) * height;
+    for (const Stroke& s : fixes.strokes) {
+        if (!s.live_at(frame)) continue;
+        const std::vector<float> c = stroke_coverage(s, frame, width, height, 1.0f);
+        for (std::size_t i = 0; i < pixels; ++i) {
+            if (c[i] <= 0.0f) continue;
+            alpha[i] = s.mode == PaintMode::kOut ? alpha[i] * (1.0f - c[i])
+                                                 : alpha[i] * (1.0f - c[i]) + c[i];
+        }
+    }
+    const std::vector<std::uint8_t> g = garbage_mask(fixes, frame, width, height, 1.0f);
+    if (!g.empty())
+        for (std::size_t i = 0; i < pixels; ++i) alpha[i] *= g[i] / 255.0f;
+}
+
 std::vector<std::uint8_t> fixes_mask(const Fixes& fixes, std::int64_t frame, int width, int height,
                                      float scale) {
     if (width <= 0 || height <= 0) return {};

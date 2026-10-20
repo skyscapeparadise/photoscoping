@@ -52,6 +52,11 @@ int rematte_feather(const PixelRect& box);
 // feather in.
 float rematte_weight(const PixelRect& box, int x, int y);
 
+// A patch, box-sized, blended into a frame-sized matte by its weight.
+// Patches on the same frame blend in turn, as the viewer folds them.
+void blend_patch(std::vector<float>& alpha, int frame_w, const PixelRect& box,
+                 const std::vector<float>& patch);
+
 // "000123_x0_y0_x1_y1.png".
 std::string patch_name(std::int64_t frame, const PixelRect& box);
 

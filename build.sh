@@ -75,10 +75,13 @@ echo "  checking vendored nlohmann/json..."
 echo "  checking vendored ONNX Runtime..."
 ./vendor/fetch_onnxruntime.sh
 
+echo "  checking vendored libvpx (VP9 export)..."
+./vendor/build_libvpx.sh
+
 # Not optional despite CMake only warning about it: without the vendored build,
 # CMake falls back to Homebrew's FFmpeg, which is --enable-gpl --enable-version3
 # and would relicense photoscoping as GPLv3 if shipped.
-echo "  checking vendored FFmpeg (LGPL, decode-only)..."
+echo "  checking vendored FFmpeg (LGPL)..."
 ./vendor/build_ffmpeg.sh
 
 # The build type is fixed at configure time and then sticky, so a cached Debug

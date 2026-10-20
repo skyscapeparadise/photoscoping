@@ -1,5 +1,6 @@
 #include "app/matte_job.hpp"
 
+#include <cstdio>
 #include <filesystem>
 #include <vector>
 
@@ -45,14 +46,20 @@ void MatteJob::locate() {
 }
 
 bool MatteJob::start(Kind kind, const std::string& clip, const std::string& lut, const std::string& out,
-                     const std::string& name) {
+                     const std::string& name, const std::string& export_to,
+                     const std::string& format) {
     if (!available() || running()) return false;
     std::error_code ec;
     fs::create_directories(out, ec);
 
     const bool rematte = kind == Kind::kRematte;
-    std::vector<std::string> args = {app_, clip, rematte ? "--rematte-clip" : "--matte-clip", out,
-                                     "--models", models_};
+    std::vector<std::string> args = {app_, clip};
+    if (kind == Kind::kExport) {
+        args.insert(args.end(), {"--mattes", out, "--export-clip", export_to, "--export-format", format});
+    } else {
+        args.insert(args.end(), {rematte ? "--rematte-clip" : "--matte-clip", out});
+    }
+    args.insert(args.end(), {"--models", models_});
     if (!lut.empty()) {
         args.push_back("--lut");
         args.push_back(lut);
@@ -63,7 +70,9 @@ bool MatteJob::start(Kind kind, const std::string& clip, const std::string& lut,
 
     // Everything the run says goes to a log beside its output rather than
     // into this process's terminal, where it would interleave with ours.
-    const std::string log_path = (fs::path(out) / (name + (rematte ? "_rematte.log" : "_matte.log"))).string();
+    const char* suffix = kind == Kind::kExport ? "_export.log" : rematte ? "_rematte.log" : "_matte.log";
+    const std::string log_path = (fs::path(out) / (name + suffix)).string();
+    log_path_ = log_path;
     log_ = SDL_IOFromFile(log_path.c_str(), "w");
 
     // Our environment, less Metal's validation layer. SDL switches that on
@@ -93,9 +102,36 @@ bool MatteJob::start(Kind kind, const std::string& clip, const std::string& lut,
         return false;
     }
     kind_ = kind;
-    SDL_Log("%s %s into %s (log: %s)", rematte ? "re-matting" : "matting", clip.c_str(),
-            out.c_str(), log_path.c_str());
+    SDL_Log("%s %s into %s (log: %s)",
+            kind == Kind::kExport ? "exporting" : rematte ? "re-matting" : "matting", clip.c_str(),
+            kind == Kind::kExport ? export_to.c_str() : out.c_str(), log_path.c_str());
     return true;
+}
+
+bool MatteJob::export_progress(std::int64_t* done, std::int64_t* total) const {
+    // The log's tail, back to the last "  n/m  frame ..." line.
+    std::FILE* f = std::fopen(log_path_.c_str(), "rb");
+    if (!f) return false;
+    std::fseek(f, 0, SEEK_END);
+    const long size = std::ftell(f);
+    const long from = size > 4096 ? size - 4096 : 0;
+    std::fseek(f, from, SEEK_SET);
+    std::string tail(static_cast<std::size_t>(size - from), '\0');
+    tail.resize(std::fread(tail.data(), 1, tail.size(), f));
+    std::fclose(f);
+    bool found = false;
+    for (std::size_t at = 0; at < tail.size();) {
+        std::size_t end = tail.find('\n', at);
+        if (end == std::string::npos) end = tail.size();
+        long long d = 0, t = 0;
+        if (std::sscanf(tail.c_str() + at, "  %lld/%lld  frame", &d, &t) == 2) {
+            *done = d;
+            *total = t;
+            found = true;
+        }
+        at = end + 1;
+    }
+    return found;
 }
 
 bool MatteJob::poll_finished(bool* succeeded) {
