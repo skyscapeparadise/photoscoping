@@ -32,23 +32,26 @@ public:
     MatteModel(const MatteModel&) = delete;
     MatteModel& operator=(const MatteModel&) = delete;
 
-    // `path` is an ONNX export of the model (tools/onnx_spike.py export, then
-    // fp16) taking a 1x3xSxS image and giving a 1x1xSxS alpha. False with a
-    // message in `error` if it cannot be loaded.
+    // `path` is an ONNX export of the model (tools/export_matting_model.py)
+    // taking a 1x3xHxW image and giving a 1x1xHxW alpha, at one fixed size.
+    // False with a message in `error` if it cannot be loaded.
     bool load(const std::string& path, Backend backend, const std::string& cache_dir,
               std::string* error);
     bool loaded() const { return session_ != nullptr; }
-    // S, read from the model's input.
-    int size() const { return size_; }
+    // The size the model takes, read from its input.
+    int width() const { return width_; }
+    int height() const { return height_; }
 
-    // `input` is model_input()'s output; the result is size x size alpha,
-    // 0..1. Empty with a message in `error` on failure.
+    // `input` is model_input()'s or tile_input()'s output at the model's
+    // size; the result is its alpha, 0..1, at the same size. Empty with a
+    // message in `error` on failure.
     std::vector<float> run(const std::vector<float>& input, std::string* error);
 
 private:
     std::unique_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::Session> session_;
-    int size_ = 0;
+    int width_ = 0;
+    int height_ = 0;
 };
 
 // Where Core ML's compiled models are kept: the user's caches, which the

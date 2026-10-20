@@ -119,6 +119,10 @@ target_link_libraries(photoscoping_media PUBLIC
 add_library(photoscoping_matting STATIC
     src/matting/preprocess.cpp
     src/matting/matte_model.cpp
+    src/matting/image_ops.cpp
+    src/matting/stack.cpp
+    src/matting/closed_form.cpp
+    src/matting/foreground.cpp
 )
 target_include_directories(photoscoping_matting PUBLIC src)
 target_link_libraries(photoscoping_matting PUBLIC onnxruntime)

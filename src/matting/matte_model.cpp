@@ -32,9 +32,10 @@ bool MatteModel::load(const std::string& path, Backend backend, const std::strin
         session_ = std::make_unique<Ort::Session>(*env_, path.c_str(), options);
         const auto shape =
             session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
-        size_ = shape.size() == 4 ? static_cast<int>(shape[3]) : 0;
-        if (size_ <= 0 || shape[2] != shape[3]) {
-            if (error) *error = "the model's input is not a fixed square image";
+        height_ = shape.size() == 4 ? static_cast<int>(shape[2]) : 0;
+        width_ = shape.size() == 4 ? static_cast<int>(shape[3]) : 0;
+        if (width_ <= 0 || height_ <= 0) {
+            if (error) *error = "the model's input is not one fixed image size";
             session_.reset();
             return false;
         }
@@ -51,7 +52,7 @@ std::vector<float> MatteModel::run(const std::vector<float>& input, std::string*
         if (error) *error = "no model loaded";
         return {};
     }
-    const std::size_t plane = static_cast<std::size_t>(size_) * size_;
+    const std::size_t plane = static_cast<std::size_t>(width_) * height_;
     if (input.size() != plane * 3) {
         if (error) *error = "the input is not the model's size";
         return {};
@@ -59,7 +60,7 @@ std::vector<float> MatteModel::run(const std::vector<float>& input, std::string*
     try {
         const Ort::MemoryInfo memory =
             Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        const int64_t shape[4] = {1, 3, size_, size_};
+        const int64_t shape[4] = {1, 3, height_, width_};
         // The input is only read; ONNX Runtime's API asks for it unconst.
         Ort::Value tensor = Ort::Value::CreateTensor<float>(
             memory, const_cast<float*>(input.data()), input.size(), shape, 4);

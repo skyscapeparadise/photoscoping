@@ -18,6 +18,9 @@ how fast, and how close.
   bench    PyTorch on MPS (today's path) against ONNX Runtime with Core ML
            and on the CPU: time per frame and difference in alpha
   compare  the C++ side's alphas against PyTorch's
+  stack    the Python stack's stages on frames of a clip, saved
+  stack-compare
+           the native stack's stages (photoscoping --matte) against those
 
 Everything goes to renders/onnx_spike/.
 
@@ -39,11 +42,12 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from matting_bakeoff import IMAGENET_MEAN, IMAGENET_STD, PINS, REC2020_TO_709, srgb_encode  # noqa: E402
+from matting_bakeoff import IMAGENET_MEAN, IMAGENET_STD, REC2020_TO_709, srgb_encode  # noqa: E402
+from export_matting_model import (Head, load_torch, make_coreml_friendly,  # noqa: E402
+                                 make_portable)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "renders" / "onnx_spike"
-REPO = "ZhengPeng7/BiRefNet_HR-matting"
 SIZE = 2048
 MODEL = OUT / f"birefnet_hr_matting_{SIZE}.onnx"
 # The same model with the backbone rewritten for Core ML (make_coreml_friendly).
@@ -51,126 +55,6 @@ MODEL_COREML = OUT / f"birefnet_hr_matting_{SIZE}_coreml.onnx"
 # That model in half precision, as PyTorch runs it today, with its input and
 # output left as fp32 so the callers do not change.
 MODEL_COREML_FP16 = OUT / f"birefnet_hr_matting_{SIZE}_coreml_fp16.onnx"
-
-
-def portable_deform_conv2d(x, offset, weight, bias, padding, mask, stride, kernel_size):
-    """torchvision's deform_conv2d out of operations every runtime has.
-
-    Each kernel tap samples the input bilinearly at its own offset position --
-    grid_sample, with zeros outside, which is how torchvision treats samples
-    off the edge -- is scaled by the tap's mask, and goes through that tap's
-    slice of the weights as a 1x1 convolution. Summed over taps, that is the
-    deformable convolution, one tap at a time so a 7x7 kernel never builds a
-    49-fold copy of its input.
-
-    Covers what BiRefNet uses: one offset group, one weight group, no
-    dilation.
-    """
-    # Sizes from the layer, as plain numbers: read off a tensor while being
-    # traced for export, they come back as tensors.
-    h, w = x.shape[-2:]
-    kh, kw = kernel_size
-    sh, sw = stride
-    ph, pw = (padding, padding) if isinstance(padding, int) else padding
-    ho, wo = offset.shape[-2:]
-    base_y = (torch.arange(ho, dtype=x.dtype, device=x.device) * sh - ph).view(1, ho, 1)
-    base_x = (torch.arange(wo, dtype=x.dtype, device=x.device) * sw - pw).view(1, 1, wo)
-    out = None
-    for k in range(kh * kw):
-        i, j = divmod(k, kw)
-        # torchvision's layout: a (dy, dx) pair per tap.
-        py = base_y + i + offset[:, 2 * k]
-        px = base_x + j + offset[:, 2 * k + 1]
-        grid = torch.stack((2.0 * px / (w - 1) - 1.0, 2.0 * py / (h - 1) - 1.0), -1)
-        sample = F.grid_sample(x, grid, mode="bilinear", padding_mode="zeros",
-                               align_corners=True) * mask[:, k:k + 1]
-        term = F.conv2d(sample, weight[:, :, i:i + 1, j:j + 1])
-        out = term if out is None else out + term
-    return out if bias is None else out + bias.view(1, -1, 1, 1)
-
-
-def make_portable(model) -> int:
-    """Swaps every deformable convolution in the model for the portable one."""
-    swapped = 0
-    for module in model.modules():
-        if type(module).__name__ != "DeformableConv2d":
-            continue
-
-        def forward(x, m=module):
-            offset = m.offset_conv(x)
-            modulator = 2.0 * torch.sigmoid(m.modulator_conv(x))
-            return portable_deform_conv2d(x, offset, m.regular_conv.weight, m.regular_conv.bias,
-                                          m.padding, modulator, m.stride,
-                                          m.regular_conv.kernel_size)
-
-        module.forward = forward
-        swapped += 1
-    return swapped
-
-
-def make_coreml_friendly(model) -> int:
-    """Rewrites the Swin backbone's attention so Core ML can take all of it.
-
-    Core ML stops at five dimensions and does not do this graph's Gathers, and
-    the backbone uses both in every block: the window split is a 6-D reshape
-    and transpose, the query, key and value are picked out of a stacked tensor
-    by index, and the position bias is looked up from a table. Each one cut
-    the model into another separately compiled Core ML piece -- 73 of them,
-    with the CPU in between. Rewritten, for one frame at a time:
-
-      - the window split and its reverse drop the batch axis, which is one, and
-        fit in five dimensions;
-      - query, key and value are split off the projection rather than indexed;
-      - the position bias, which depends on nothing but the weights, is looked
-        up once here and stored as a constant.
-
-    The same arithmetic in another shape; `check --coreml` compares it.
-    """
-    import sys as _sys
-    remote = _sys.modules[type(model).__module__]
-
-    def window_partition(x, ws):
-        _, h, w, c = x.shape
-        x = x.reshape(h // ws, ws, w // ws, ws, c)
-        return x.permute(0, 2, 1, 3, 4).reshape(-1, ws, ws, c)
-
-    def window_reverse(windows, ws, h, w):
-        c = windows.shape[-1]
-        x = windows.reshape(h // ws, w // ws, ws, ws, c)
-        return x.permute(0, 2, 1, 3, 4).reshape(1, h, w, c)
-
-    remote.window_partition = window_partition
-    remote.window_reverse = window_reverse
-
-    rewritten = 0
-    for module in model.modules():
-        if type(module).__name__ != "WindowAttention":
-            continue
-        n = module.window_size[0] * module.window_size[1]
-        with torch.no_grad():
-            bias = module.relative_position_bias_table[module.relative_position_index.view(-1)]
-            bias = bias.view(n, n, -1).permute(2, 0, 1).unsqueeze(0).contiguous()
-        module.register_buffer("bias_constant", bias, persistent=False)
-
-        def forward(x, mask=None, m=module):
-            b, n_, c = x.shape
-            heads = m.num_heads
-            q, k, v = m.qkv(x).split(c, dim=-1)
-            q = q.reshape(b, n_, heads, c // heads).transpose(1, 2) * m.scale
-            k = k.reshape(b, n_, heads, c // heads).transpose(1, 2)
-            v = v.reshape(b, n_, heads, c // heads).transpose(1, 2)
-            attn = q @ k.transpose(-2, -1) + m.bias_constant
-            if mask is not None:
-                nw = mask.shape[0]
-                attn = attn.view(b // nw, nw, heads, n_, n_) + mask.unsqueeze(1).unsqueeze(0)
-                attn = attn.view(-1, heads, n_, n_)
-            attn = m.softmax(attn)
-            out = (attn @ v).transpose(1, 2).reshape(b, n_, c)
-            return m.proj_drop(m.proj(out))
-
-        module.forward = forward
-        rewritten += 1
-    return rewritten
 
 
 def check(args) -> int:
@@ -187,26 +71,6 @@ def check(args) -> int:
     d = (got - want).abs()
     print(f"at {args.size}²: max |Δα| {d.max().item():.2e}, mean {d.mean().item():.2e}")
     return 0
-
-
-def load_torch(device: str, half: bool):
-    from transformers import AutoModelForImageSegmentation
-    model = AutoModelForImageSegmentation.from_pretrained(REPO, revision=PINS[REPO],
-                                                          trust_remote_code=True)
-    # The checkpoint loads as half; fp32 has to be asked for.
-    model.eval().to(device)
-    return model.half() if half else model.float()
-
-
-class Head(torch.nn.Module):
-    """The model as the stack uses it: last output, through a sigmoid."""
-
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-
-    def forward(self, x):
-        return self.model(x)[-1].sigmoid()
 
 
 def export(args) -> int:
@@ -373,6 +237,66 @@ def bench(args) -> int:
     return 0
 
 
+def pipe_frame(clip: pathlib.Path, lut: pathlib.Path | None, index: int):
+    """Frame `index` as the matting stack sees it: (sRGB, linear), Rec.709."""
+    cmd = [str(ROOT / "build" / "photoscoping"), str(clip), "--pipe", "--frame", str(index)]
+    if lut:
+        cmd += ["--lut", str(lut)]
+    source = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    header = source.stdout.readline().split()
+    w, h = int(header[1]), int(header[2])
+    raw = source.stdout.read(w * h * 8)
+    source.stdout.close()
+    source.wait()
+    rgba = np.frombuffer(raw, dtype=np.float16).reshape(h, w, 4)
+    linear = rgba[..., :3].astype(np.float32) @ REC2020_TO_709.T
+    return srgb_encode(linear).astype(np.float32), linear
+
+
+STAGES = ["coarse", "tiled", "band", "subject"]
+
+
+def stack(args) -> int:
+    """The Python stack's stages on frames, saved for the native stack's to be
+    compared with (photoscoping --matte, then stack-compare)."""
+    from matting_bakeoff import BiRefNet
+    from matting_stack import band_matting, ml_foreground, tiled_alpha
+    OUT.mkdir(parents=True, exist_ok=True)
+    model = BiRefNet("BiRefNet HR-matting @2048²", "ZhengPeng7/BiRefNet_HR-matting", (2048, 2048))
+    model.load("mps")
+    for index in args.at:
+        srgb, linear = pipe_frame(args.clip, args.lut, index)
+        t0 = time.perf_counter()
+        coarse = model(srgb, linear, "mps")
+        t1 = time.perf_counter()
+        tiled = tiled_alpha(model, srgb, coarse, "mps")
+        t2 = time.perf_counter()
+        band = band_matting(srgb, linear, tiled)
+        t3 = time.perf_counter()
+        subject = ml_foreground(np.clip(linear, 0.0, None), band)
+        t4 = time.perf_counter()
+        for stage, data in (("coarse", coarse), ("tiled", tiled), ("band", band),
+                            ("subject", subject)):
+            data.astype(np.float32).tofile(OUT / f"py_{stage}_{index:06d}.f32")
+        print(f"frame {index}: coarse {t1 - t0:.2f} s, tiled {t2 - t1:.2f} s, "
+              f"band {t3 - t2:.2f} s, subject {t4 - t3:.2f} s")
+    return 0
+
+
+def stack_compare(args) -> int:
+    print(f"{'':8} {'frame':>7}  {'mean |Δα|':>10}  {'max |Δα|':>9}  {'>1/255':>8}")
+    for stage in STAGES:
+        for py in sorted(OUT.glob(f"py_{stage}_*.f32")):
+            frame = py.stem.split("_")[-1]
+            native = OUT / f"native_{stage}_{frame}.f32"
+            if not native.exists():
+                continue
+            d = np.abs(np.fromfile(native, dtype=np.float32) - np.fromfile(py, dtype=np.float32))
+            print(f"{stage:8} {frame:>7}  {d.mean():10.5f}  {d.max():9.4f}  "
+                  f"{(d > 1 / 255).mean():8.2%}")
+    return 0
+
+
 def compare(args) -> int:
     """The C++ side's alphas against PyTorch's, frame by frame."""
     rows = []
@@ -421,11 +345,17 @@ def main() -> int:
     p.add_argument("--lut", type=pathlib.Path)
     p.add_argument("--at", type=int, nargs="+", default=[100, 300, 500])
     sub.add_parser("compare")
+    p = sub.add_parser("stack")
+    p.add_argument("clip", type=pathlib.Path)
+    p.add_argument("--lut", type=pathlib.Path)
+    p.add_argument("--at", type=int, nargs="+", default=[100, 300, 500])
+    sub.add_parser("stack-compare")
     p = sub.add_parser("bench")
     p.add_argument("--only", help="only the ONNX Runtime providers whose name contains this")
     args = parser.parse_args()
     return {"export": export, "check": check, "fp16": fp16, "frames": frames, "bench": bench,
-            "compare": compare}[args.command](args)
+            "compare": compare, "stack": stack,
+            "stack-compare": stack_compare}[args.command](args)
 
 
 if __name__ == "__main__":

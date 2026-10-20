@@ -40,6 +40,8 @@ vendor/onnxruntime/
 *.dpx
 footage/
 renders/
+# The matting models tools/export_matting_model.py writes; hundreds of MB each.
+models/
 
 # Python environment for tools/ scripts (the matting bake-off)
 .venv/

@@ -13,6 +13,7 @@
 #include "gpu/ingest_pass.hpp"
 #include "matting/matte_model.hpp"
 #include "matting/preprocess.hpp"
+#include "matting/stack.hpp"
 #include "media/video_decoder.hpp"
 
 namespace {
@@ -26,9 +27,9 @@ struct Options {
     bool pipe = false;
     int bench = 0;
     bool software = false;
-    std::string coarse;
-    std::string matte_model;
-    std::string dump_input;
+    std::string matte;
+    std::string matte_stage = "subject";
+    std::string models = "models";
     bool model_cpu = false;
     std::string screenshot;
     std::string mattes = "renders";
@@ -50,13 +51,15 @@ void usage() {
         "                 a header line \"PSRAW <w> <h> <frames> <fps>\", then\n"
         "                 each frame as w*h RGBA half floats (linear Rec.2020)\n"
         "  --software     decode on the CPU instead of VideoToolbox\n"
-        "  --coarse FILE  run the matting model on --frame and write its alpha as\n"
-        "                 raw float32 at the model's size, for comparing\n"
-        "  --matte-model FILE\n"
-        "                 the ONNX export --coarse runs (tools/onnx_spike.py)\n"
-        "  --dump-input FILE\n"
-        "                 with --coarse, also write the model's input, raw float32\n"
-        "  --model-cpu    with --coarse, run the model on the CPU, not Core ML\n"
+        "  --matte FILE   matte --frame with the native stack and write its alpha as\n"
+        "                 raw float32 at the frame's size, for comparing\n"
+        "  --matte-stage coarse|tiled|band|subject\n"
+        "                 how far through the stack --matte goes (default\n"
+        "                 subject, whose output is RGB linear Rec.709, interleaved)\n"
+        "  --models DIR   where tools/export_matting_model.py wrote the models\n"
+        "                 (default: models)\n"
+        "  --model-cpu    run the models on the CPU, not Core ML\n"
+        "                 (with --matte, --bench N mattes N frames and times them)\n"
         "  --mattes DIR   where tools/matte_clip.py wrote this clip's renders\n"
         "                 (default: renders)\n"
         "  --view NAME    open on footage, matte, subject or overlay\n"
@@ -94,18 +97,20 @@ std::optional<Options> parse_args(int argc, char** argv) {
             if (!v) return std::nullopt;
             o.bench = std::atoi(v);
             if (o.bench <= 0) return std::nullopt;
-        } else if (a == "--coarse") {
+        } else if (a == "--matte") {
             const char* v = value();
             if (!v) return std::nullopt;
-            o.coarse = v;
-        } else if (a == "--matte-model") {
+            o.matte = v;
+        } else if (a == "--matte-stage") {
+            const char* v = value();
+            const std::string stage = v ? v : "";
+            if (stage != "coarse" && stage != "tiled" && stage != "band" && stage != "subject")
+                return std::nullopt;
+            o.matte_stage = v;
+        } else if (a == "--models") {
             const char* v = value();
             if (!v) return std::nullopt;
-            o.matte_model = v;
-        } else if (a == "--dump-input") {
-            const char* v = value();
-            if (!v) return std::nullopt;
-            o.dump_input = v;
+            o.models = v;
         } else if (a == "--model-cpu") {
             o.model_cpu = true;
         } else if (a == "--software") {
@@ -134,8 +139,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
         }
     }
     if (!o.export_path.empty()) o.probe = true;
-    if (!o.coarse.empty() && o.matte_model.empty()) return std::nullopt;
-    if ((o.probe || o.bench || o.pipe || !o.coarse.empty()) && o.clip.empty()) return std::nullopt;
+    if ((o.probe || o.bench || o.pipe || !o.matte.empty()) && o.clip.empty()) return std::nullopt;
     return o;
 }
 
@@ -223,56 +227,93 @@ bool write_floats(const std::string& path, const std::vector<float>& data) {
     return std::fclose(f) == 0 && ok;
 }
 
-// One frame through the native matting model: the working image read back,
-// prepared, and run. Each stage is timed, since how long they take is half of
-// what this is for; the other half is the alpha, written for comparison with
-// the Python stack's (tools/onnx_spike.py compare).
-bool run_coarse(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestPass& ingest,
-                const ps::media::VideoDecoder& decoder, const ps::gpu::InputTransform& transform) {
+// One frame through the native matting stack, as far as --matte-stage: the
+// working image read back, prepared, and matted. Each stage is timed, since
+// how long they take is half of what this is for; the other half is the
+// alpha, written for comparison with the Python stack's (tools/onnx_spike.py
+// stack, then stack-compare).
+bool run_matte(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestPass& ingest,
+               ps::media::VideoDecoder& decoder, const ps::gpu::InputTransform& transform) {
     auto ms_since = [](Uint64 start) { return (SDL_GetTicksNS() - start) / 1e6; };
 
     Uint64 t = SDL_GetTicksNS();
-    ps::matting::MatteModel model;
+    ps::matting::MattingStack stack;
     std::string error;
     const auto backend =
         o.model_cpu ? ps::matting::MatteModel::Backend::kCpu : ps::matting::MatteModel::Backend::kGpu;
-    if (!model.load(o.matte_model, backend, ps::matting::default_cache_dir(), &error)) {
-        std::fprintf(stderr, "cannot load %s: %s\n", o.matte_model.c_str(), error.c_str());
+    if (!stack.load(o.models, backend, ps::matting::default_cache_dir(), &error)) {
+        std::fprintf(stderr, "cannot load the models in %s: %s\n", o.models.c_str(), error.c_str());
         return false;
     }
-    std::printf("model   : %s, %dx%d, %s, loaded in %.0f ms\n", o.matte_model.c_str(),
-                model.size(), model.size(), o.model_cpu ? "CPU" : "Core ML GPU", ms_since(t));
+    std::printf("models  : %s, %s, loaded in %.0f ms\n", o.models.c_str(),
+                o.model_cpu ? "CPU" : "Core ML GPU", ms_since(t));
 
-    t = SDL_GetTicksNS();
-    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
-    const bool ingested = ingest.process(cmd, decoder, transform);
-    SDL_SubmitGPUCommandBuffer(cmd);
-    if (!ingested) return false;
-    const std::vector<float> working = ingest.read_working();
-    const double read_ms = ms_since(t);
+    // With --bench, that many frames on from --frame, one after another as a
+    // run would take them: the first pays each model's warm-up, and the
+    // average leaves it out. The first frame's result is what is written.
+    const int frames = std::max(1, o.bench);
+    double steady_ms = 0.0;
+    for (int n = 0; n < frames; ++n) {
+        if (n > 0 && !decoder.read_next()) break;
+        const Uint64 frame_start = SDL_GetTicksNS();
+        t = frame_start;
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
+        const bool ingested = ingest.process(cmd, decoder, transform);
+        SDL_SubmitGPUCommandBuffer(cmd);
+        if (!ingested) return false;
+        const std::vector<float> working = ingest.read_working();
+        const double read_ms = ms_since(t);
 
-    t = SDL_GetTicksNS();
-    const std::vector<float> input = ps::matting::model_input(
-        working, static_cast<int>(ingest.width()), static_cast<int>(ingest.height()), model.size());
-    const double prep_ms = ms_since(t);
-    if (!o.dump_input.empty() && !write_floats(o.dump_input, input)) {
-        std::fprintf(stderr, "cannot write %s\n", o.dump_input.c_str());
-        return false;
-    }
+        t = SDL_GetTicksNS();
+        const ps::matting::MattingFrame frame = ps::matting::prepare_frame(
+            working, static_cast<int>(ingest.width()), static_cast<int>(ingest.height()));
+        const double prep_ms = ms_since(t);
 
-    t = SDL_GetTicksNS();
-    const std::vector<float> alpha = model.run(input, &error);
-    const double run_ms = ms_since(t);
-    if (alpha.empty()) {
-        std::fprintf(stderr, "the model failed: %s\n", error.c_str());
-        return false;
+        // Each stage in turn, as far as asked for, timed.
+        const char* const kStages[] = {"coarse", "tiled", "band", "subject"};
+        std::vector<float> alpha, out;
+        std::string timings;
+        for (const char* stage : kStages) {
+            t = SDL_GetTicksNS();
+            const std::string name = stage;
+            if (name == "coarse") alpha = stack.coarse(frame, &error);
+            else if (name == "tiled") alpha = stack.tiled(frame, alpha, &error);
+            else if (name == "band") alpha = ps::matting::MattingStack::band(frame, alpha, &error);
+            else out = ps::matting::MattingStack::subject(frame, alpha);
+            if (alpha.empty()) {
+                std::fprintf(stderr, "the %s stage failed: %s\n", stage, error.c_str());
+                return false;
+            }
+            char line[64];
+            std::snprintf(line, sizeof line, "%s %.0f ms, ", stage, ms_since(t));
+            timings += line;
+            if (name == o.matte_stage) break;
+        }
+        const double frame_ms = ms_since(frame_start);
+        if (n > 0) steady_ms += frame_ms;
+        std::printf("frame %lld: read back %.0f ms, prepare %.0f ms, %stotal %.0f ms\n",
+                    static_cast<long long>(decoder.frame_index()), read_ms, prep_ms,
+                    timings.c_str(), frame_ms);
+        if (n > 0) continue;
+
+        if (o.matte_stage == "subject") {
+            // Interleaved, as the Python stack's arrays are.
+            const std::size_t pixels = alpha.size();
+            std::vector<float> rgb(pixels * 3);
+            for (std::size_t i = 0; i < pixels; ++i)
+                for (int c = 0; c < 3; ++c) rgb[i * 3 + c] = out[c * pixels + i];
+            out = std::move(rgb);
+        } else {
+            out = alpha;
+        }
+        if (!write_floats(o.matte, out)) {
+            std::fprintf(stderr, "cannot write %s\n", o.matte.c_str());
+            return false;
+        }
     }
-    if (!write_floats(o.coarse, alpha)) {
-        std::fprintf(stderr, "cannot write %s\n", o.coarse.c_str());
-        return false;
-    }
-    std::printf("coarse  : read back %.0f ms, prepare %.0f ms, model %.0f ms -> %s\n", read_ms,
-                prep_ms, run_ms, o.coarse.c_str());
+    if (frames > 1)
+        std::printf("matte   : %.2f s/frame after the first, over %d frames\n",
+                    steady_ms / 1000.0 / (frames - 1), frames - 1);
     return true;
 }
 
@@ -310,7 +351,7 @@ int main(int argc, char** argv) {
     // The headless modes decode here; the window opens its clip itself, on
     // a worker thread, the same way it opens one dropped on it later.
     const bool headless =
-        options->probe || options->bench || options->pipe || !options->coarse.empty();
+        options->probe || options->bench || options->pipe || !options->matte.empty();
     ps::media::VideoDecoder decoder;
     if (headless) {
         if (!decoder.open(options->clip, !options->software)) return 1;
@@ -352,8 +393,8 @@ int main(int argc, char** argv) {
         describe(decoder, transform, lut, options->pipe ? stderr : stdout);
     }
 
-    if (!options->coarse.empty()) {
-        const int status = run_coarse(*options, gpu, ingest, decoder, transform) ? 0 : 1;
+    if (!options->matte.empty()) {
+        const int status = run_matte(*options, gpu, ingest, decoder, transform) ? 0 : 1;
         ingest.destroy();
         gpu.destroy();
         SDL_Quit();
