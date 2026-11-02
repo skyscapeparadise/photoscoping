@@ -1,6 +1,8 @@
 #include "matting/foreground.hpp"
 
 #include <algorithm>
+
+#include "matting/image_ops.hpp"
 #include <cmath>
 
 namespace ps::matting {
@@ -118,6 +120,42 @@ std::vector<float> estimate_foreground_ml(const std::vector<float>& image,
         h_prev = h;
     }
     return f;
+}
+
+std::vector<float> estimate_foreground_known(const std::vector<float>& image,
+                                             const std::vector<float>& alpha,
+                                             const std::vector<float>& wall, int width,
+                                             int height) {
+    std::vector<float> fg = estimate_foreground_ml(image, alpha, width, height);
+    const std::size_t pixels = static_cast<std::size_t>(width) * height;
+    // The direct answer, planar, and softened a little: dividing by a faint,
+    // noisy alpha turns its grain into colour, and a subject's own colour
+    // does not change from one pixel to the next.
+    std::vector<float> direct[3];
+    for (int c = 0; c < 3; ++c) direct[c].resize(pixels);
+    for (std::size_t i = 0; i < pixels; ++i) {
+        const float a = std::max(alpha[i], 1e-3f);
+        for (int c = 0; c < 3; ++c) {
+            const float b = wall[i * 3 + c];
+            direct[c][i] = std::clamp(b + (image[i * 3 + c] - b) / a, 0.0f, 1.0f);
+        }
+    }
+    for (int c = 0; c < 3; ++c) direct[c] = gaussian_blur(direct[c], width, height, 1.5f);
+    for (std::size_t i = 0; i < pixels; ++i) {
+        const float a = alpha[i];
+        // From 0.15 to 0.5 the direct answer takes over; below, coverage is
+        // too faint to divide by.
+        float t = std::clamp((a - 0.15f) / 0.35f, 0.0f, 1.0f);
+        t = t * t * (3.0f - 2.0f * t);
+        if (t <= 0.0f) continue;
+        // Solid, the footage is the subject's colour as it is.
+        if (a >= 0.999f) {
+            for (int c = 0; c < 3; ++c) fg[i * 3 + c] = std::clamp(image[i * 3 + c], 0.0f, 1.0f);
+            continue;
+        }
+        for (int c = 0; c < 3; ++c) fg[i * 3 + c] = fg[i * 3 + c] * (1.0f - t) + direct[c][i] * t;
+    }
+    return fg;
 }
 
 }  // namespace ps::matting

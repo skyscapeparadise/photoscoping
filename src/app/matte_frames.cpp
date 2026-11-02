@@ -45,7 +45,14 @@ void MatteFrames::open(SDL_GPUDevice* device, const std::string& dir, std::int64
     // red, so the main thread only copies it. Whether the file is there is
     // asked of the disk, not of done_, which the main thread rescans.
     start([this](std::int64_t frame) {
-        SDL_Surface* file = IMG_Load(frame_path(dir_, frame).c_str());
+        std::string preferred;
+        {
+            std::lock_guard<std::mutex> lock(preferred_mutex_);
+            preferred = preferred_;
+        }
+        SDL_Surface* file = preferred.empty() ? nullptr : IMG_Load(frame_path(preferred, frame).c_str());
+        loaded_refined_ = file != nullptr;
+        if (!file) file = IMG_Load(frame_path(dir_, frame).c_str());
         if (!file) return false;
         SDL_Surface* rgba = SDL_ConvertSurface(file, SDL_PIXELFORMAT_ABGR8888);
         SDL_DestroySurface(file);
@@ -70,7 +77,40 @@ void MatteFrames::destroy() {
     done_count_ = 0;
 }
 
+void MatteFrames::set_preferred(const std::string& dir) {
+    {
+        std::lock_guard<std::mutex> lock(preferred_mutex_);
+        if (dir == preferred_) return;
+        preferred_ = dir;
+    }
+    rescan();
+    // What the frame on screen shows may have changed.
+    refresh();
+}
+
 bool MatteFrames::rescan() {
+    // The preferred folder first, counted the same way.
+    std::string preferred;
+    {
+        std::lock_guard<std::mutex> lock(preferred_mutex_);
+        preferred = preferred_;
+    }
+    std::vector<bool> refined(done_.size(), false);
+    std::int64_t refined_count = 0;
+    if (!preferred.empty()) {
+        std::error_code pec;
+        for (fs::directory_iterator it(preferred, pec), end; !pec && it != end; it.increment(pec)) {
+            std::int64_t index = 0;
+            if (!frame_of(it->path().filename().string(), &index)) continue;
+            if (index < 0 || index >= static_cast<std::int64_t>(refined.size())) continue;
+            refined[static_cast<std::size_t>(index)] = true;
+            ++refined_count;
+        }
+    }
+    const bool refined_changed = refined != refined_;
+    refined_ = std::move(refined);
+    refined_count_ = refined_count;
+
     std::vector<bool> done(done_.size(), false);
     std::int64_t count = 0;
     fs::file_time_type newest{};
@@ -84,7 +124,7 @@ bool MatteFrames::rescan() {
         const fs::file_time_type written = it->last_write_time(ec);
         if (!ec && written > newest) newest = written;
     }
-    const bool changed = done != done_;
+    const bool changed = done != done_ || refined_changed;
     done_ = std::move(done);
     done_count_ = count;
     newest_ = newest;
@@ -99,6 +139,7 @@ bool MatteFrames::matted(std::int64_t frame) const {
 bool MatteFrames::upload(SDL_GPUCommandBuffer* cmd) {
     SDL_Surface* rgba = loaded_;
     if (!rgba) return false;
+    shown_refined_ = loaded_refined_;
     if (!texture_ || rgba->w != width_ || rgba->h != height_) {
         if (texture_) SDL_ReleaseGPUTexture(device_, texture_);
         if (transfer_) SDL_ReleaseGPUTransferBuffer(device_, transfer_);

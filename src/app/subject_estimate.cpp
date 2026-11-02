@@ -122,8 +122,16 @@ void SubjectEstimate::loop() {
         pending_.reset();
         busy_ = true;
         lock.unlock();
+        if (in.plate_path != plate_path_) {
+            plate_path_ = in.plate_path;
+            half_plate_ = {};
+            matting::PlateImage full;
+            if (!plate_path_.empty() && matting::load_plate(plate_path_, &full))
+                half_plate_ = matting::halve_plate(full);
+        }
         int w = 0, h = 0;
-        std::vector<std::uint16_t> made = estimate(in, &w, &h);
+        std::vector<std::uint16_t> made =
+            estimate(in, half_plate_.empty() ? nullptr : &half_plate_, &w, &h);
         lock.lock();
         busy_ = false;
         // Kept only if nothing newer has been asked for meanwhile.
@@ -144,7 +152,9 @@ void SubjectEstimate::loop() {
     }
 }
 
-std::vector<std::uint16_t> SubjectEstimate::estimate(const Inputs& in, int* width, int* height) {
+std::vector<std::uint16_t> SubjectEstimate::estimate(const Inputs& in,
+                                                     const matting::PlateImage* half_plate,
+                                                     int* width, int* height) {
     const int w = in.width, h = in.height;
     const std::size_t pixels = static_cast<std::size_t>(w) * h;
     if (w < 2 || h < 2 || in.working.size() != pixels * 4 || in.coverage.size() != pixels) return {};
@@ -188,7 +198,23 @@ std::vector<std::uint16_t> SubjectEstimate::estimate(const Inputs& in, int* widt
             }
             small_alpha[d] = a * 0.25f;
         }
-    const std::vector<float> fg = matting::estimate_foreground_ml(image, small_alpha, hw, hh);
+    std::vector<float> fg;
+    if (half_plate && half_plate->width == hw && half_plate->height == hh) {
+        // The wall known: the plate relit for this frame, as an export does.
+        matting::MattingFrame small;
+        small.width = hw;
+        small.height = hh;
+        small.linear.resize(half * 3);
+        for (std::size_t i = 0; i < half; ++i)
+            for (int c = 0; c < 3; ++c) small.linear[c * half + i] = image[i * 3 + c];
+        const std::vector<float> wall = matting::relight_plate(*half_plate, small, small_alpha);
+        std::vector<float> wall_rgb(half * 3);
+        for (std::size_t i = 0; i < half; ++i)
+            for (int c = 0; c < 3; ++c) wall_rgb[i * 3 + c] = std::clamp(wall[c * half + i], 0.0f, 1.0f);
+        fg = matting::estimate_foreground_known(image, small_alpha, wall_rgb, hw, hh);
+    } else {
+        fg = matting::estimate_foreground_ml(image, small_alpha, hw, hh);
+    }
 
     // Back to the working space, which the view converts for the display.
     const color::Mat3 to2020 = color::to_working(color::Gamut::kRec709);

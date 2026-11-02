@@ -32,9 +32,10 @@ public:
     bool available() const { return !app_.empty() && !models_.empty(); }
 
     // What a run makes: the whole clip's mattes (--matte-clip), the patches
-    // its re-matte boxes want (--rematte-clip), or an export of it
-    // (--export-clip). One at a time -- they all want the whole GPU.
-    enum class Kind { kMatte, kRematte, kExport };
+    // its re-matte boxes want (--rematte-clip), an export of it
+    // (--export-clip), or its clean plate (--plate-clip). One at a time --
+    // they all want the GPU.
+    enum class Kind { kMatte, kRematte, kExport, kPlate };
 
     // `lut` may be empty. Output goes under `out`, where the viewer reads it;
     // the run's own output goes to a log there.

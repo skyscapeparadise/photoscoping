@@ -337,6 +337,26 @@ void test_shape_editing() {
     std::filesystem::remove(path);
 }
 
+void test_plate_range() {
+    Fixes f;
+    CHECK(!f.plate.set());
+    f.plate = PlateRange{10, 60, false};
+    CHECK(plate_image_name("clip", f.plate) == "clip_plate_10_60.png");
+    CHECK(plate_mattes_name("clip", f.plate) == "clip_mattes_plate_10_60");
+    f.plate.correct = true;
+    CHECK(plate_mattes_name("clip", f.plate) == "clip_mattes_plate_10_60_correct");
+    const std::vector<std::int64_t> frames = plate_frames(f.plate, 16);
+    CHECK(frames.size() == 16 && frames.front() == 10 && frames.back() == 60);
+    CHECK(plate_frames(PlateRange{3, 5, false}).size() == 3);
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "photoscoping_test_plate.json").string();
+    std::string error;
+    CHECK(f.save(path, &error));
+    Fixes back;
+    CHECK(back.load(path, &error) && back.plate == f.plate);
+    std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
@@ -350,6 +370,7 @@ int main() {
     test_apply_fixes();
     test_blend_patch();
     test_shape_editing();
+    test_plate_range();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);
         return 1;

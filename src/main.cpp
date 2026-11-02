@@ -37,6 +37,7 @@ struct Options {
     std::string matte;
     std::string matte_clip;
     std::string rematte_clip;
+    std::string plate_clip;
     std::string export_path_out;
     ps::media::ExportFormat export_format = ps::media::ExportFormat::kProRes4444;
     std::int64_t export_first = 0;
@@ -85,6 +86,9 @@ void usage() {
         "                 a folder of 16-bit RGBA frames)\n"
         "  --export-range A:B\n"
         "                 only frames A to B, inclusive\n"
+        "  --plate-clip DIR\n"
+        "                 make the clean plate the clip's fixes in DIR name\n"
+        "  --range A:B    with --matte-clip or --export-clip, only frames A to B\n"
         "  --models DIR   where tools/export_matting_model.py wrote the models\n"
         "                 (default: models)\n"
         "  --model-cpu    run the models on the CPU, not Core ML\n"
@@ -141,7 +145,11 @@ std::optional<Options> parse_args(int argc, char** argv) {
         } else if (a == "--export-format") {
             const char* v = value();
             if (!v || !ps::media::parse_export_format(v, &o.export_format)) return std::nullopt;
-        } else if (a == "--export-range") {
+        } else if (a == "--plate-clip") {
+            const char* v = value();
+            if (!v) return std::nullopt;
+            o.plate_clip = v;
+        } else if (a == "--export-range" || a == "--range") {
             const char* v = value();
             long long first = 0, last = 0;
             if (!v || std::sscanf(v, "%lld:%lld", &first, &last) != 2 || first < 0 || last < first)
@@ -191,7 +199,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
     }
     if (!o.export_path.empty()) o.probe = true;
     if ((o.probe || o.bench || o.pipe || !o.matte.empty() || !o.matte_clip.empty() ||
-         !o.rematte_clip.empty() || !o.export_path_out.empty()) &&
+         !o.rematte_clip.empty() || !o.export_path_out.empty() || !o.plate_clip.empty()) &&
         o.clip.empty())
         return std::nullopt;
     return o;
@@ -376,40 +384,94 @@ bool run_matte(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestPass& 
 // temporary name and renamed into place so a reader never sees half of one.
 // Frames already there are skipped, so a run that was stopped picks up where
 // it left off. Progress goes to stdout, a line a frame, for the log.
+//
+// With a clean plate set in the clip's fixes, each frame is also refined by
+// it (exporting::plate_pass) into a folder of its own, named for the plate
+// -- the stack's mattes stay as they are -- and a frame already matted is
+// only refined.
 bool run_matte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestPass& ingest,
                     ps::media::VideoDecoder& decoder, const ps::gpu::InputTransform& transform) {
     namespace fs = std::filesystem;
-    const fs::path out =
-        fs::path(o.matte_clip) / (fs::path(o.clip).stem().string() + "_mattes");
+    const std::string stem = fs::path(o.clip).stem().string();
+    const fs::path out = fs::path(o.matte_clip) / (stem + "_mattes");
     std::error_code ec;
     fs::create_directories(out, ec);
-    auto frame_png = [&](std::int64_t i) {
+    auto frame_png = [](const fs::path& dir, std::int64_t i) {
         char name[32];
         std::snprintf(name, sizeof name, "%06lld.png", static_cast<long long>(i));
-        return out / name;
+        return dir / name;
     };
 
-    const std::int64_t total = decoder.frame_count();
-    std::int64_t first = 0;
-    while (first < total && fs::exists(frame_png(first), ec)) ++first;
-    std::int64_t done = 0;
-    for (std::int64_t i = 0; i < total; ++i) done += fs::exists(frame_png(i), ec) ? 1 : 0;
-    std::printf("%s: %lld frames, %lld already matted\n", o.clip.c_str(),
-                static_cast<long long>(total), static_cast<long long>(done));
-    std::fflush(stdout);
-    if (done >= total) return true;
-
-    const Uint64 load_start = SDL_GetTicksNS();
-    ps::matting::MattingStack stack;
+    ps::fixes::Fixes fixes;
     std::string error;
-    const auto backend =
-        o.model_cpu ? ps::matting::MatteModel::Backend::kCpu : ps::matting::MatteModel::Backend::kGpu;
-    if (!stack.load(o.models, backend, ps::matting::default_cache_dir(), &error)) {
-        std::fprintf(stderr, "cannot load the models in %s: %s\n", o.models.c_str(), error.c_str());
+    if (!fixes.load((fs::path(o.matte_clip) / (stem + "_fixes.json")).string(), &error)) {
+        std::fprintf(stderr, "cannot read the fixes: %s\n", error.c_str());
         return false;
     }
-    std::printf("models loaded in %.0f s\n", (SDL_GetTicksNS() - load_start) / 1e9);
+    const bool with_plate = fixes.plate.set();
+    const fs::path plate_out =
+        with_plate ? fs::path(o.matte_clip) / ps::fixes::plate_mattes_name(stem, fixes.plate) : fs::path();
+    if (with_plate) fs::create_directories(plate_out, ec);
+
+    const std::int64_t total = decoder.frame_count();
+    const std::int64_t range_first = std::clamp<std::int64_t>(o.export_first, 0, std::max<std::int64_t>(total - 1, 0));
+    const std::int64_t range_last = o.export_last < 0 ? total - 1 : std::min(o.export_last, total - 1);
+    auto needs = [&](std::int64_t i, bool* base, bool* plate) {
+        *base = !fs::exists(frame_png(out, i), ec);
+        *plate = with_plate && !fs::exists(frame_png(plate_out, i), ec);
+        return *base || *plate;
+    };
+    std::int64_t first = range_first, done = 0;
+    bool nb = false, np = false;
+    while (first <= range_last && !needs(first, &nb, &np)) ++first;
+    for (std::int64_t i = range_first; i <= range_last; ++i) done += needs(i, &nb, &np) ? 0 : 1;
+    const std::int64_t count = range_last - range_first + 1;
+    std::printf("%s: %lld frames, %lld already matted%s\n", o.clip.c_str(), static_cast<long long>(count),
+                static_cast<long long>(done), with_plate ? " and refined by the plate" : "");
     std::fflush(stdout);
+    if (done >= count) return true;
+
+    ps::matting::PlateImage plate;
+    if (with_plate &&
+        !ps::exporting::obtain_plate(o.matte_clip, stem, fixes.plate, gpu, ingest, decoder, transform,
+                                     &plate, &error)) {
+        std::fprintf(stderr, "cannot make the clean plate: %s\n", error.c_str());
+        return false;
+    }
+
+    // The models only if a frame needs the stack itself.
+    bool any_base = false;
+    for (std::int64_t i = first; i <= range_last && !any_base; ++i) {
+        needs(i, &nb, &np);
+        any_base = nb;
+    }
+    ps::matting::MattingStack stack;
+    if (any_base) {
+        const Uint64 load_start = SDL_GetTicksNS();
+        const auto backend = o.model_cpu ? ps::matting::MatteModel::Backend::kCpu
+                                         : ps::matting::MatteModel::Backend::kGpu;
+        if (!stack.load(o.models, backend, ps::matting::default_cache_dir(), &error)) {
+            std::fprintf(stderr, "cannot load the models in %s: %s\n", o.models.c_str(), error.c_str());
+            return false;
+        }
+        std::printf("models loaded in %.0f s\n", (SDL_GetTicksNS() - load_start) / 1e9);
+        std::fflush(stdout);
+    }
+
+    auto write = [&](const fs::path& path, const std::vector<float>& alpha, int w, int h) {
+        fs::path partial = path;
+        partial.replace_extension(".partial.png");
+        if (!ps::matting::write_png16(partial.string(), alpha, w, h)) {
+            std::fprintf(stderr, "cannot write %s\n", partial.c_str());
+            return false;
+        }
+        fs::rename(partial, path, ec);
+        if (ec) {
+            std::fprintf(stderr, "cannot rename %s: %s\n", partial.c_str(), ec.message().c_str());
+            return false;
+        }
+        return true;
+    };
 
     if (!decoder.seek_frame(first)) {
         std::fprintf(stderr, "cannot decode frame %lld\n", static_cast<long long>(first));
@@ -417,9 +479,10 @@ bool run_matte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestP
     }
     const Uint64 started = SDL_GetTicksNS();
     std::int64_t made = 0;
-    for (std::int64_t i = first; i < total; ++i) {
+    for (std::int64_t i = first; i <= range_last; ++i) {
         if (i > first && !decoder.read_next()) break;
-        if (fs::exists(frame_png(i), ec)) continue;
+        bool base_needed = false, plate_needed = false;
+        if (!needs(i, &base_needed, &plate_needed)) continue;
         const Uint64 t = SDL_GetTicksNS();
 
         SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
@@ -430,34 +493,67 @@ bool run_matte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestP
             ingest.read_working(), static_cast<int>(ingest.width()),
             static_cast<int>(ingest.height()));
 
-        std::vector<float> alpha = stack.coarse(frame, &error);
-        if (!alpha.empty()) alpha = stack.tiled(frame, alpha, &error);
-        if (!alpha.empty()) alpha = ps::matting::MattingStack::band(frame, alpha, &error);
-        if (alpha.empty()) {
-            std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(i), error.c_str());
-            return false;
+        std::vector<float> alpha;
+        if (base_needed) {
+            alpha = stack.coarse(frame, &error);
+            if (!alpha.empty()) alpha = stack.tiled(frame, alpha, &error);
+            if (!alpha.empty()) alpha = ps::matting::MattingStack::band(frame, alpha, &error);
+            if (alpha.empty()) {
+                std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(i), error.c_str());
+                return false;
+            }
+            if (!write(frame_png(out, i), alpha, frame.width, frame.height)) return false;
+        } else {
+            alpha = ps::exporting::read_matte(o.matte_clip, stem, i, frame.width, frame.height);
+            if (alpha.empty()) {
+                std::fprintf(stderr, "cannot read the matte for frame %lld\n", static_cast<long long>(i));
+                return false;
+            }
         }
-        fs::path partial = frame_png(i);
-        partial.replace_extension(".partial.png");
-        if (!ps::matting::write_png16(partial.string(), alpha, frame.width, frame.height)) {
-            std::fprintf(stderr, "cannot write %s\n", partial.c_str());
-            return false;
-        }
-        fs::rename(partial, frame_png(i), ec);
-        if (ec) {
-            std::fprintf(stderr, "cannot rename %s: %s\n", partial.c_str(), ec.message().c_str());
-            return false;
+        if (plate_needed) {
+            const std::vector<float> refined =
+                ps::exporting::plate_pass(frame, alpha, plate, fixes.plate.correct, &error);
+            if (refined.empty()) {
+                std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(i), error.c_str());
+                return false;
+            }
+            if (!write(frame_png(plate_out, i), refined, frame.width, frame.height)) return false;
         }
 
         ++made;
         ++done;
         const double per = (SDL_GetTicksNS() - started) / 1e9 / static_cast<double>(made);
         std::printf("  %lld/%lld  frame %lld  %.2f s  eta %.1f min\n", static_cast<long long>(done),
-                    static_cast<long long>(total), static_cast<long long>(i),
-                    (SDL_GetTicksNS() - t) / 1e9, per * static_cast<double>(total - done) / 60.0);
+                    static_cast<long long>(count), static_cast<long long>(i),
+                    (SDL_GetTicksNS() - t) / 1e9, per * static_cast<double>(count - done) / 60.0);
         std::fflush(stdout);
     }
-    return done >= total;
+    return done >= count;
+}
+
+// The clip's clean plate on its own, as the app's plate job: made from the
+// frames its fixes name, so the editor has it to show and to estimate with.
+bool run_plate_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestPass& ingest,
+                    ps::media::VideoDecoder& decoder, const ps::gpu::InputTransform& transform) {
+    namespace fs = std::filesystem;
+    const std::string stem = fs::path(o.clip).stem().string();
+    ps::fixes::Fixes fixes;
+    std::string error;
+    if (!fixes.load((fs::path(o.plate_clip) / (stem + "_fixes.json")).string(), &error)) {
+        std::fprintf(stderr, "cannot read the fixes: %s\n", error.c_str());
+        return false;
+    }
+    if (!fixes.plate.set()) {
+        std::fprintf(stderr, "the clip has no clean plate set\n");
+        return false;
+    }
+    ps::matting::PlateImage plate;
+    if (!ps::exporting::obtain_plate(o.plate_clip, stem, fixes.plate, gpu, ingest, decoder, transform,
+                                     &plate, &error)) {
+        std::fprintf(stderr, "cannot make the clean plate: %s\n", error.c_str());
+        return false;
+    }
+    return true;
 }
 
 // The patches the clip's re-matte boxes want, as the app's re-matte job:
@@ -519,6 +615,14 @@ bool run_rematte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::Inges
     std::printf("models loaded in %.0f s\n", (SDL_GetTicksNS() - load_start) / 1e9);
     std::fflush(stdout);
 
+    ps::matting::PlateImage plate;
+    if (fixes.plate.set() &&
+        !ps::exporting::obtain_plate(o.rematte_clip, stem, fixes.plate, gpu, ingest, decoder, transform,
+                                     &plate, &error)) {
+        std::fprintf(stderr, "cannot make the clean plate: %s\n", error.c_str());
+        return false;
+    }
+
     const Uint64 started = SDL_GetTicksNS();
     std::int64_t at = -1;  // the frame the decoder holds
     std::size_t made = 0;
@@ -543,19 +647,27 @@ bool run_rematte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::Inges
 
         // The matte the patch is to sit in: the one on disk, which is what
         // the viewer blends it over, or failing that the coarse model's.
-        std::vector<float> base =
-            ps::exporting::read_matte(o.rematte_clip, stem, frame_index, frame.width, frame.height);
+        std::vector<float> base = ps::exporting::read_shown_matte(o.rematte_clip, stem, fixes, frame_index,
+                                                                  frame.width, frame.height);
         if (base.empty()) base = stack.coarse(frame, &error);
         if (base.empty()) {
             std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(frame_index), error.c_str());
             return false;
         }
 
+        // A plate, if the clip has one, lets the closer look know the wall.
+        std::vector<float> wall;
+        float tolerance = 0.0f;
+        if (!plate.empty()) {
+            wall = ps::matting::relight_plate(plate, frame, base);
+            tolerance = ps::matting::plate_tolerance(frame, wall, base);
+        }
+
         for (; n < jobs.size() && jobs[n].frame == frame_index; ++n) {
             const ps::fixes::PixelRect& box = jobs[n].box;
             float detail = 1.0f;
-            const std::vector<float> patch =
-                ps::exporting::make_patch(stack, frame, base, box, &detail, &error);
+            const std::vector<float> patch = ps::exporting::make_patch(
+                stack, frame, base, box, &detail, &error, wall.empty() ? nullptr : &wall, tolerance);
             if (patch.empty() ||
                 !ps::exporting::write_patch((out / ps::fixes::patch_name(frame_index, box)).string(),
                                             patch, box, &error)) {
@@ -611,7 +723,7 @@ int main(int argc, char** argv) {
     const bool headless =
         options->probe || options->bench || options->pipe || !options->matte.empty() ||
         !options->matte_clip.empty() || !options->rematte_clip.empty() ||
-        !options->export_path_out.empty();
+        !options->export_path_out.empty() || !options->plate_clip.empty();
     ps::media::VideoDecoder decoder;
     if (headless) {
         if (!decoder.open(options->clip, !options->software)) return 1;
@@ -654,6 +766,14 @@ int main(int argc, char** argv) {
 
     if (!options->matte_clip.empty()) {
         const int status = run_matte_clip(*options, gpu, ingest, decoder, transform) ? 0 : 1;
+        ingest.destroy();
+        gpu.destroy();
+        SDL_Quit();
+        return status;
+    }
+
+    if (!options->plate_clip.empty()) {
+        const int status = run_plate_clip(*options, gpu, ingest, decoder, transform) ? 0 : 1;
         ingest.destroy();
         gpu.destroy();
         SDL_Quit();

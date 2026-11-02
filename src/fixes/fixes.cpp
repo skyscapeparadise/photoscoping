@@ -97,6 +97,28 @@ bool Track::remove_point(std::size_t index, std::size_t minimum) {
     return true;
 }
 
+std::string plate_image_name(const std::string& clip, const PlateRange& plate) {
+    return clip + "_plate_" + std::to_string(plate.first) + "_" + std::to_string(plate.last) + ".png";
+}
+
+std::string plate_mattes_name(const std::string& clip, const PlateRange& plate) {
+    return clip + "_mattes_plate_" + std::to_string(plate.first) + "_" + std::to_string(plate.last) +
+           (plate.correct ? "_correct" : "");
+}
+
+std::vector<std::int64_t> plate_frames(const PlateRange& plate, int limit) {
+    std::vector<std::int64_t> frames;
+    if (!plate.set() || limit <= 0) return frames;
+    const std::int64_t count = plate.last - plate.first + 1;
+    if (count <= limit) {
+        for (std::int64_t f = plate.first; f <= plate.last; ++f) frames.push_back(f);
+        return frames;
+    }
+    for (int i = 0; i < limit; ++i)
+        frames.push_back(plate.first + (count - 1) * i / (limit - 1));
+    return frames;
+}
+
 Garbage* Fixes::find(int id) {
     for (Garbage& g : garbage)
         if (g.id == id) return &g;
@@ -244,6 +266,13 @@ bool Fixes::load(const std::string& path, std::string* error) {
         rematte.push_back(std::move(box));
     }
     for (const Rematte& r : rematte) next_id = std::max(next_id, r.id + 1);
+    if (doc.contains("plate") && doc["plate"].is_object()) {
+        const nlohmann::json& p = doc["plate"];
+        plate.first = p.value("first", std::int64_t{-1});
+        plate.last = p.value("last", std::int64_t{-1});
+        plate.correct = p.value("correct", false);
+        if (!plate.set()) plate = PlateRange{};
+    }
     for (const Garbage& g : garbage) next_id = std::max(next_id, g.id + 1);
     for (const Stroke& st : strokes) next_id = std::max(next_id, st.id + 1);
     return true;
@@ -272,6 +301,8 @@ bool Fixes::save(const std::string& path, std::string* error) const {
     for (const Rematte& r : rematte)
         rematte_json.push_back({{"id", r.id}, {"keys", write_keys(r.keys)}});
     doc["rematte"] = rematte_json;
+    if (plate.set())
+        doc["plate"] = {{"first", plate.first}, {"last", plate.last}, {"correct", plate.correct}};
 
     // Written beside and renamed into place, so a crash mid-write leaves the
     // last good file, not half of a new one.

@@ -11,7 +11,14 @@ struct FileMenuActions {
     void (*export_as)(void* context, int format) = nullptr;
     // Whether exporting is possible now; the export items are greyed when not.
     bool (*can_export)(void* context) = nullptr;
+    // A Clip menu item about the clean plate (a PlateAction).
+    void (*plate)(void* context, int action) = nullptr;
+    // What the Clip menu shows (PlateState bits).
+    int (*plate_state)(void* context) = nullptr;
 };
+
+enum PlateAction { kPlateStart = 0, kPlateEnd = 1, kPlateClear = 2, kPlateCorrect = 3 };
+enum PlateState { kPlateClipOpen = 1, kPlateIsSet = 2, kPlateCorrects = 4 };
 
 // A File menu in the menu bar, between the application menu and SDL's Window
 // menu:
@@ -20,6 +27,13 @@ struct FileMenuActions {
 //   Export Subject  >       ProRes 4444 with Alpha (Command-E), VP9 with
 //                           Alpha, PNG Sequence
 //   Export Matte    >       ProRes 422, ProRes 422 LT, HEVC, H.264
+//
+// and a Clip menu, for the clean plate:
+//
+//   Start Clean Plate Here      Command-[
+//   End Clean Plate Here        Command-]
+//   Clear Clean Plate
+//   Plate Corrects the Matte    (checked when on)
 //
 // False while there is no menu bar to add to: SDL builds it as the
 // application finishes launching, on the first pass of the event loop, which

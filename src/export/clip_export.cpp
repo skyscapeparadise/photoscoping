@@ -62,11 +62,12 @@ bool only_frames_of(const fs::path& dir, const std::string& name_of_export) {
 
 std::vector<float> make_patch(matting::MattingStack& stack, const matting::MattingFrame& frame,
                               const std::vector<float>& base, const fixes::PixelRect& box,
-                              float* detail, std::string* error) {
+                              float* detail, std::string* error, const std::vector<float>* wall,
+                              float tolerance) {
     const fixes::RematteCrop c = fixes::rematte_crop(box, frame.width, frame.height);
     if (detail) *detail = c.detail;
     const std::vector<float> alpha = stack.closer(frame, base, c.crop.x0, c.crop.y0, c.crop.width(),
-                                                  c.crop.height(), c.wide, error);
+                                                  c.crop.height(), c.wide, error, wall, tolerance);
     if (alpha.empty()) return {};
     std::vector<float> patch(static_cast<std::size_t>(box.width()) * box.height());
     for (int y = 0; y < box.height(); ++y)
@@ -103,6 +104,104 @@ std::vector<float> read_matte(const std::string& render_dir, const std::string& 
     return values;
 }
 
+std::vector<float> read_shown_matte(const std::string& render_dir, const std::string& clip_stem,
+                                    const fixes::Fixes& fixes, std::int64_t frame, int width,
+                                    int height) {
+    if (fixes.plate.set()) {
+        std::vector<float> values;
+        int w = 0, h = 0;
+        const fs::path path = fs::path(render_dir) / fixes::plate_mattes_name(clip_stem, fixes.plate) /
+                              frame_name(frame);
+        if (matting::read_png16(path.string(), &values, &w, &h) && w == width && h == height)
+            return values;
+    }
+    return read_matte(render_dir, clip_stem, frame, width, height);
+}
+
+bool obtain_plate(const std::string& render_dir, const std::string& clip_stem,
+                  const fixes::PlateRange& range, gpu::GpuContext& gpu, gpu::IngestPass& ingest,
+                  media::VideoDecoder& decoder, const gpu::InputTransform& transform,
+                  matting::PlateImage* plate, std::string* error) {
+    const fs::path path = fs::path(render_dir) / fixes::plate_image_name(clip_stem, range);
+    if (matting::load_plate(path.string(), plate) && plate->width == decoder.width() &&
+        plate->height == decoder.height())
+        return true;
+
+    matting::PlateBuilder builder;
+    for (const std::int64_t f : fixes::plate_frames(range)) {
+        if (f >= decoder.frame_count() || !decoder.seek_frame(f)) {
+            *error = "cannot decode plate frame " + std::to_string(f);
+            return false;
+        }
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
+        const bool ingested = ingest.process(cmd, decoder, transform);
+        SDL_SubmitGPUCommandBuffer(cmd);
+        if (!ingested) {
+            *error = "cannot read plate frame " + std::to_string(f);
+            return false;
+        }
+        builder.add(matting::prepare_frame(ingest.read_working(), static_cast<int>(ingest.width()),
+                                           static_cast<int>(ingest.height())));
+    }
+    *plate = builder.finish();
+    if (plate->empty()) {
+        *error = "no frames for the plate";
+        return false;
+    }
+    // Written beside and renamed, like everything else a viewer reads.
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    fs::path partial = path;
+    partial.replace_extension(".partial.png");
+    if (!matting::save_plate(partial.string(), *plate)) {
+        *error = "cannot write " + partial.string();
+        return false;
+    }
+    fs::rename(partial, path, ec);
+    if (ec) {
+        *error = "cannot rename " + partial.string() + ": " + ec.message();
+        return false;
+    }
+    // Plates made from other frames are cleared: seconds to make again,
+    // and only this one is wanted. Only files named exactly as plates are.
+    const std::string prefix = clip_stem + "_plate_";
+    for (fs::directory_iterator it(path.parent_path(), ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name == path.filename().string() || name.compare(0, prefix.size(), prefix) != 0) continue;
+        long long a = 0, b = 0;
+        char tail[8] = {};
+        if (std::sscanf(name.c_str() + prefix.size(), "%lld_%lld%7s", &a, &b, tail) == 3 &&
+            std::string(tail) == ".png" &&
+            name == fixes::plate_image_name(clip_stem, fixes::PlateRange{a, b, false})) {
+            std::error_code removed;
+            fs::remove(it->path(), removed);
+        }
+    }
+    std::printf("made the clean plate from %d frames: %s\n", builder.count(), path.c_str());
+    std::fflush(stdout);
+    return true;
+}
+
+std::vector<float> plate_pass(const matting::MattingFrame& frame, const std::vector<float>& alpha,
+                              const matting::PlateImage& plate, bool correct, std::string* error,
+                              std::vector<float>* wall_out, float* tolerance_out) {
+    std::vector<float> wall = matting::relight_plate(plate, frame, alpha);
+    if (wall.empty()) {
+        *error = "the plate is not the frame's size";
+        return {};
+    }
+    const float tolerance = matting::plate_tolerance(frame, wall, alpha);
+    std::vector<float> refined =
+        correct ? matting::correct_with_plate(frame, wall, alpha, tolerance) : alpha;
+    // The corrected matte moved; the plate is relit from what it now says
+    // is wall before the band leans on it.
+    if (correct) wall = matting::relight_plate(plate, frame, refined);
+    refined = matting::MattingStack::band(frame, refined, error, &wall, tolerance);
+    if (wall_out) *wall_out = std::move(wall);
+    if (tolerance_out) *tolerance_out = tolerance;
+    return refined;
+}
+
 bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestPass& ingest,
                 media::VideoDecoder& decoder, const gpu::InputTransform& transform) {
     const std::string stem = fs::path(request.clip).stem().string();
@@ -115,18 +214,29 @@ bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestP
 
     // Everything checked before anything is written: a matte for every frame.
     std::error_code ec;
-    const fs::path mattes = fs::path(request.render_dir) / (stem + "_mattes");
-    for (std::int64_t f = first; f <= last; ++f)
-        if (!fs::exists(mattes / frame_name(f), ec)) {
-            std::fprintf(stderr, "frame %lld has no matte; matte the clip first\n",
-                         static_cast<long long>(f));
-            return false;
-        }
-
     fixes::Fixes fixes;
     std::string error;
     if (!fixes.load((fs::path(request.render_dir) / (stem + "_fixes.json")).string(), &error)) {
         std::fprintf(stderr, "cannot read the fixes: %s\n", error.c_str());
+        return false;
+    }
+    // With a plate set, every frame refined by it too: an export is of the
+    // matte as the viewer shows it.
+    const fs::path mattes = fs::path(request.render_dir) / (stem + "_mattes");
+    const fs::path plate_mattes =
+        fs::path(request.render_dir) / fixes::plate_mattes_name(stem, fixes.plate);
+    for (std::int64_t f = first; f <= last; ++f)
+        if (!fs::exists(mattes / frame_name(f), ec) ||
+            (fixes.plate.set() && !fs::exists(plate_mattes / frame_name(f), ec))) {
+            std::fprintf(stderr, "frame %lld has no matte%s; matte the clip first\n",
+                         static_cast<long long>(f), fixes.plate.set() ? " refined by the plate" : "");
+            return false;
+        }
+    matting::PlateImage plate;
+    if (fixes.plate.set() &&
+        !obtain_plate(request.render_dir, stem, fixes.plate, gpu, ingest, decoder, transform, &plate,
+                      &error)) {
+        std::fprintf(stderr, "cannot make the clean plate: %s\n", error.c_str());
         return false;
     }
     const fs::path patches_dir = fs::path(request.render_dir) / (stem + "_rematte");
@@ -198,7 +308,7 @@ bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestP
         const matting::MattingFrame frame = matting::prepare_frame(
             ingest.read_working(), static_cast<int>(ingest.width()), static_cast<int>(ingest.height()));
 
-        std::vector<float> alpha = read_matte(request.render_dir, stem, f, w, h);
+        std::vector<float> alpha = read_shown_matte(request.render_dir, stem, fixes, f, w, h);
         if (alpha.empty()) {
             std::fprintf(stderr, "cannot read the matte for frame %lld\n", static_cast<long long>(f));
             return false;
@@ -215,7 +325,14 @@ bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestP
                 ph != j.box.height()) {
                 matting::MattingStack* s = need_stack();
                 if (!s) return false;
-                patch = make_patch(*s, frame, base, j.box, nullptr, &error);
+                std::vector<float> wall;
+                float tolerance = 0.0f;
+                if (!plate.empty()) {
+                    wall = matting::relight_plate(plate, frame, base);
+                    tolerance = matting::plate_tolerance(frame, wall, base);
+                }
+                patch = make_patch(*s, frame, base, j.box, nullptr, &error,
+                                   wall.empty() ? nullptr : &wall, tolerance);
                 fs::create_directories(patches_dir, ec);
                 if (patch.empty() || !write_patch(path, patch, j.box, &error)) {
                     std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(f), error.c_str());
@@ -234,7 +351,21 @@ bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestP
             for (std::size_t i = 0; i < pixels; ++i)
                 for (int c = 0; c < 3; ++c)
                     image[i * 3 + c] = std::clamp(frame.linear[c * pixels + i], 0.0f, 1.0f);
-            const std::vector<float> fg = matting::estimate_foreground_ml(image, alpha, w, h);
+            // With a plate, the wall behind is known, and the subject's
+            // colour follows from it exactly where there is enough of it.
+            std::vector<float> fg;
+            if (!plate.empty()) {
+                const std::vector<float> wall = matting::relight_plate(plate, frame, alpha);
+                // (relit from the final matte, so the wall is measured where
+                // the export says it shows)
+                std::vector<float> wall_rgb(pixels * 3);
+                for (std::size_t i = 0; i < pixels; ++i)
+                    for (int c = 0; c < 3; ++c)
+                        wall_rgb[i * 3 + c] = std::clamp(wall[c * pixels + i], 0.0f, 1.0f);
+                fg = matting::estimate_foreground_known(image, alpha, wall_rgb, w, h);
+            } else {
+                fg = matting::estimate_foreground_ml(image, alpha, w, h);
+            }
             for (std::size_t i = 0; i < pixels; ++i) {
                 for (int c = 0; c < 3; ++c) samples[i * 4 + c] = matting::to_sample(encode_709(fg[i * 3 + c]));
                 samples[i * 4 + 3] = matting::to_sample(alpha[i]);

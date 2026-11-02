@@ -24,5 +24,9 @@ std::uint16_t to_sample(float v);
 // Reads a greyscale PNG, 8 or 16 bits, at full precision -- SDL_image would
 // bring a 16-bit matte down to 8. False for anything else.
 bool read_png16(const std::string& path, std::vector<float>* values, int* width, int* height);
+// Any PNG of 1, 3 or 4 channels at 8 or 16 bits, as planes: all of the first
+// channel, then the second.
+bool read_png16_planes(const std::string& path, std::vector<float>* values, int* width, int* height,
+                       int* channels);
 
 }  // namespace ps::matting

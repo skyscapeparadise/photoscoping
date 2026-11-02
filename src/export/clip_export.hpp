@@ -7,6 +7,8 @@
 #include "fixes/rematte.hpp"
 #include "gpu/gpu_context.hpp"
 #include "gpu/ingest_pass.hpp"
+#include "fixes/fixes.hpp"
+#include "matting/plate.hpp"
 #include "matting/preprocess.hpp"
 #include "matting/stack.hpp"
 #include "media/export_format.hpp"
@@ -21,7 +23,8 @@ namespace ps::exporting {
 // `detail` is set to how far the crop was magnified. Empty on failure.
 std::vector<float> make_patch(matting::MattingStack& stack, const matting::MattingFrame& frame,
                               const std::vector<float>& base, const fixes::PixelRect& box,
-                              float* detail, std::string* error);
+                              float* detail, std::string* error,
+                              const std::vector<float>* wall = nullptr, float tolerance = 0.0f);
 // Written under a temporary name and renamed into place, so the viewer never
 // reads half of one.
 bool write_patch(const std::string& path, const std::vector<float>& patch,
@@ -31,6 +34,27 @@ bool write_patch(const std::string& path, const std::vector<float>& patch,
 // size. Empty when the frame has none.
 std::vector<float> read_matte(const std::string& render_dir, const std::string& clip_stem,
                               std::int64_t frame, int width, int height);
+
+// The clip's matte for a frame as the viewer shows it: refined by the clean
+// plate if one is set and that frame has been, the stack's own otherwise.
+std::vector<float> read_shown_matte(const std::string& render_dir, const std::string& clip_stem,
+                                    const fixes::Fixes& fixes, std::int64_t frame, int width,
+                                    int height);
+
+// The clip's clean plate: read if it has been made, made and saved if not --
+// its frames decoded, prepared and averaged. Leaves the decoder wherever the
+// last of them was; callers seek again.
+bool obtain_plate(const std::string& render_dir, const std::string& clip_stem,
+                  const fixes::PlateRange& range, gpu::GpuContext& gpu, gpu::IngestPass& ingest,
+                  media::VideoDecoder& decoder, const gpu::InputTransform& transform,
+                  matting::PlateImage* plate, std::string* error);
+
+// One frame's matte refined by the plate: the plate relit for the frame,
+// the override applied if asked for, and the band solved again knowing the
+// wall. `wall` and `tolerance`, if given, are set to what was used.
+std::vector<float> plate_pass(const matting::MattingFrame& frame, const std::vector<float>& alpha,
+                              const matting::PlateImage& plate, bool correct, std::string* error,
+                              std::vector<float>* wall = nullptr, float* tolerance = nullptr);
 
 struct ExportRequest {
     std::string clip;        // for its name

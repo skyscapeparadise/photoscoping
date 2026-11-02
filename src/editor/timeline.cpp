@@ -247,6 +247,14 @@ void Timeline::set_keys(const std::vector<std::int64_t>& frames) {
     refresh_playhead();
 }
 
+void Timeline::set_plate(std::int64_t first, std::int64_t last) {
+    if (first == plate_first_ && last == plate_last_) return;
+    plate_first_ = first;
+    plate_last_ = last;
+    built_width_ = -1.0f;  // the band is part of the ruler
+    refresh_playhead();
+}
+
 void Timeline::layout_self() {
     const bool show_clock = width - kTimecodeWidth - kTransportWidth >= kMinRuler;
     const float right = kTransportWidth + (show_clock ? kTimecodeWidth : 0.0f);
@@ -333,6 +341,18 @@ void Timeline::rebuild_ruler() {
     clip_span_->height = kHeight;
     clip_span_->fill = theme::kClipSpan;
     clip_span_->width = static_cast<float>(frame_seconds(frame_count_)) * pixels_per_second_;
+    // The clean plate's frames, faintly, behind everything else on the ruler.
+    if (plate_first_ >= 0 && plate_last_ >= plate_first_ && plate_first_ < frame_count_) {
+        auto* band = ticks_->add<ui::RectNode>();
+        band->x = static_cast<float>(frame_seconds(plate_first_)) * pixels_per_second_;
+        band->width = std::max(2.0f, static_cast<float>(frame_seconds(std::min(plate_last_, frame_count_ - 1) -
+                                                                        plate_first_ + 1)) *
+                                         pixels_per_second_);
+        band->height = kHeight;
+        gpu::Color tint = theme::kWhite;
+        tint.a = 0.10f;
+        band->fill = tint;
+    }
     // A small diamond -- a square on its point -- for each frame a fix has a
     // key on, below the matte line: a rounded square read at this size is
     // close enough, and needs no triangles.

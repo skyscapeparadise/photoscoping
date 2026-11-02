@@ -103,7 +103,8 @@ std::vector<float> MattingStack::tiled(const MattingFrame& frame, const std::vec
 }
 
 std::vector<float> MattingStack::closer(const MattingFrame& frame, const std::vector<float>& base,
-                                        int x, int y, int w, int h, bool wide, std::string* error) {
+                                        int x, int y, int w, int h, bool wide, std::string* error,
+                                        const std::vector<float>* wall, float tolerance) {
     const MattingFrame crop = crop_frame(frame, x, y, w, h);
     MatteModel& model = wide ? tile_ : whole_;
     std::vector<float> look = model.run(model_input(crop, model.width(), model.height()), error);
@@ -131,11 +132,20 @@ std::vector<float> MattingStack::closer(const MattingFrame& frame, const std::ve
         const float b = std::clamp(blend[i], 0.0f, 1.0f);
         fused[i] = b * std::clamp(look[i], 0.0f, 1.0f) + (1.0f - b) * under[i];
     }
-    return MattingStack::band(crop, fused, error);
+    if (!wall) return MattingStack::band(crop, fused, error);
+    // The plate's part under the crop.
+    const std::size_t source = static_cast<std::size_t>(frame.width) * frame.height;
+    std::vector<float> wall_crop(pixels * 3);
+    for (int c = 0; c < 3; ++c)
+        for (int row = 0; row < h; ++row)
+            std::copy_n(&(*wall)[c * source + static_cast<std::size_t>(y + row) * frame.width + x], w,
+                        &wall_crop[c * pixels + static_cast<std::size_t>(row) * w]);
+    return MattingStack::band(crop, fused, error, &wall_crop, tolerance);
 }
 
 std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vector<float>& alpha,
-                                      std::string* error) {
+                                      std::string* error, const std::vector<float>* plate_wall,
+                                      float tolerance) {
     const int w = frame.width, h = frame.height;
     const std::size_t pixels = static_cast<std::size_t>(w) * h;
 
@@ -147,6 +157,20 @@ std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vect
     std::vector<double> trimap(pixels);
     for (std::size_t i = 0; i < pixels; ++i)
         trimap[i] = unknown[i] ? 0.5 : (alpha[i] >= 0.5f ? 1.0 : 0.0);
+    // With a plate: what the matte calls mostly wall and looks exactly like
+    // the wall is wall, which pins the solve down where it is otherwise
+    // freest -- the haze just outside an edge.
+    if (plate_wall) {
+        for (std::size_t i = 0; i < pixels; ++i) {
+            if (!unknown[i] || alpha[i] >= 0.5f) continue;
+            float d2 = 0.0f;
+            for (int c = 0; c < 3; ++c) {
+                const float d = frame.linear[c * pixels + i] - (*plate_wall)[c * pixels + i];
+                d2 += d * d;
+            }
+            if (d2 < tolerance * tolerance) trimap[i] = 0.0;
+        }
+    }
 
     // Solved in padded cells, so the full-resolution problem stays small.
     // A cell with nothing unknown, or without both subject and wall to solve
@@ -218,7 +242,7 @@ std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vect
         wall_known[i] = alpha[i] < 0.02f && luma[i] > floor;
         subject_known[i] = alpha[i] > 0.95f;
     }
-    const std::vector<float> wall = fill_plate(frame.linear, w, h, wall_known);
+    const std::vector<float> wall = plate_wall ? *plate_wall : fill_plate(frame.linear, w, h, wall_known);
     const std::vector<float> subject = fill_plate(frame.linear, w, h, subject_known);
 
     std::vector<float> out(pixels);

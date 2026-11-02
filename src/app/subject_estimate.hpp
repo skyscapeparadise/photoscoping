@@ -13,6 +13,7 @@
 #include "app/mask_texture.hpp"
 #include "fixes/fixes.hpp"
 #include "fixes/rematte.hpp"
+#include "matting/plate.hpp"
 
 namespace ps::app {
 
@@ -43,6 +44,9 @@ public:
         std::vector<std::uint8_t> patches;
         fixes::PixelRect patch_rect;
         fixes::Fixes fixes;
+        // The clip's clean plate, if it has one made: the wall behind is then
+        // known, as an export knows it. Read and halved on the worker, once.
+        std::string plate_path;
     };
 
     SubjectEstimate() = default;
@@ -75,7 +79,9 @@ public:
 
     // The work itself: the estimate as RGBA half floats, half size. Exposed
     // for the tests.
-    static std::vector<std::uint16_t> estimate(const Inputs& in, int* width, int* height);
+    // `half_plate`, if given, is the clean plate at half the frame's size.
+    static std::vector<std::uint16_t> estimate(const Inputs& in, const matting::PlateImage* half_plate,
+                                               int* width, int* height);
 
 private:
     void loop();
@@ -96,6 +102,10 @@ private:
     int made_w_ = 0, made_h_ = 0;
     std::int64_t made_frame_ = -1;
     std::uint64_t made_version_ = 0;
+
+    // The plate as last read, on the worker only.
+    std::string plate_path_;
+    matting::PlateImage half_plate_;
 
     MaskTexture texture_;
     std::int64_t shown_frame_ = -1;

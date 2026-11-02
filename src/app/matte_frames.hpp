@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -27,7 +28,22 @@ public:
     void open(SDL_GPUDevice* device, const std::string& dir, std::int64_t frame_count);
     void destroy();
 
-    // Looks at the directory again. True when anything changed.
+    // A second folder of the same frames that, where it has one, is shown
+    // instead: the mattes refined by the clip's clean plate. Empty for none.
+    void set_preferred(const std::string& dir);
+    // Which frames the preferred folder has, and how many.
+    const std::vector<bool>& refined() const { return refined_; }
+    std::int64_t refined_count() const { return refined_count_; }
+    // Whether the frame on screen came from the preferred folder.
+    bool shown_refined() const { return shown_refined_; }
+    // Whether the frame on screen is not the best there is for it: a refined
+    // one has landed since it was read.
+    bool shown_outdated(std::int64_t frame) const {
+        return shown_ == frame && !shown_refined_ && frame >= 0 &&
+               frame < static_cast<std::int64_t>(refined_.size()) && refined_[static_cast<std::size_t>(frame)];
+    }
+
+    // Looks at the directories again. True when anything changed.
     bool rescan();
 
     // Which frames have a matte, one entry per frame of the clip.
@@ -55,9 +71,16 @@ protected:
 private:
     // Decoded on the worker, uploaded from on the main thread.
     SDL_Surface* loaded_ = nullptr;
+    bool loaded_refined_ = false;
+    bool shown_refined_ = false;
 
     SDL_GPUDevice* device_ = nullptr;
     std::string dir_;
+    // Read by the worker, so changed under the lock.
+    mutable std::mutex preferred_mutex_;
+    std::string preferred_;
+    std::vector<bool> refined_;
+    std::int64_t refined_count_ = 0;
     std::vector<bool> done_;
     std::int64_t done_count_ = 0;
     std::filesystem::file_time_type newest_{};

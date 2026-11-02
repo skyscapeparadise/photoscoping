@@ -90,6 +90,17 @@ private:
     bool can_export() const;
     void show_export_dialog(int format_index);
     void start_export(const std::string& path, int format_index);
+    // Clip > the clean plate: marks its frames at the playhead, clears it,
+    // or turns its override on and off (PlateAction).
+    void plate_action(int action);
+    int plate_state() const;
+    // Brings the viewer, the ruler and the plate's own image into line with
+    // the plate in the fixes: the refined mattes shown where there are any,
+    // and the plate made if it has not been.
+    void update_plate();
+    std::string plate_image_path() const;
+    bool plate_image_ready() const;
+    void start_plate_job();
     // Adds the File menu once there is a menu bar to add it to.
     void install_menu();
     void set_playing(bool playing);
@@ -176,6 +187,9 @@ private:
     Uint64 job_started_ns_ = 0;
     std::int64_t done_at_start_ = 0;
     std::size_t made_at_start_ = 0;
+    std::int64_t refined_at_start_ = 0;
+    // The plate wants making, and waits for the run that is going to end.
+    bool plate_wanted_ = false;
     Uint64 last_poll_ns_ = 0;
     editor::View view_ = editor::View::kFootage;
 

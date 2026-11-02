@@ -95,11 +95,36 @@ struct Rematte : Track {
     void normalize();
 };
 
+// A clean plate (matting/plate.hpp): the frames of the clip where the set is
+// empty, from first to last, averaged. Optional. By default it refines edges
+// and colour only; with `correct` it also overrules the model where the matte
+// and the plate clearly disagree.
+struct PlateRange {
+    std::int64_t first = -1;
+    std::int64_t last = -1;
+    bool correct = false;
+    bool set() const { return first >= 0 && last >= first; }
+    friend bool operator==(const PlateRange& a, const PlateRange& b) {
+        return a.first == b.first && a.last == b.last && a.correct == b.correct;
+    }
+};
+
+// Named for the frames they came from -- and the mattes for the mode too --
+// so a plate changed is a plate new, never one half made from the old.
+//   <clip>_plate_<first>_<last>.png
+//   <clip>_mattes_plate_<first>_<last>[_correct]/
+std::string plate_image_name(const std::string& clip, const PlateRange& plate);
+std::string plate_mattes_name(const std::string& clip, const PlateRange& plate);
+// The frames the plate is averaged from: all of them, or `limit` spread
+// evenly across.
+std::vector<std::int64_t> plate_frames(const PlateRange& plate, int limit = 16);
+
 struct Fixes {
     std::vector<Garbage> garbage;
     // In the order they were painted, which is the order they apply in.
     std::vector<Stroke> strokes;
     std::vector<Rematte> rematte;
+    PlateRange plate;
     int next_id = 1;
 
     Garbage* find(int id);

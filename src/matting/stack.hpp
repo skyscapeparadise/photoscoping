@@ -33,8 +33,14 @@ public:
     std::vector<float> coarse(const MattingFrame& frame, std::string* error);
     std::vector<float> tiled(const MattingFrame& frame, const std::vector<float>& coarse,
                              std::string* error);
+    // With `wall` -- a clean plate relit for this frame (matting/plate.hpp),
+    // planar linear Rec.709 -- the band knows the wall instead of guessing it:
+    // a pixel in it the matte calls mostly wall that matches the plate within
+    // `tolerance` is solved as wall, and the wall's true colour says how far
+    // the solve can be trusted.
     static std::vector<float> band(const MattingFrame& frame, const std::vector<float>& tiled,
-                                   std::string* error);
+                                   std::string* error, const std::vector<float>* wall = nullptr,
+                                   float tolerance = 0.0f);
     static std::vector<float> subject(const MattingFrame& frame, const std::vector<float>& alpha);
 
     // A local re-matte: the region from (x, y), w x h, looked at again on its
@@ -47,8 +53,10 @@ public:
     // Everywhere else the crop keeps `base`, the frame's own matte, so the
     // result meets the matte around it without a seam. Returns the region's
     // alpha, w x h.
+    // `wall`, if given, is the frame's relit plate, as band() takes it.
     std::vector<float> closer(const MattingFrame& frame, const std::vector<float>& base, int x,
-                              int y, int w, int h, bool wide, std::string* error);
+                              int y, int w, int h, bool wide, std::string* error,
+                              const std::vector<float>* wall = nullptr, float tolerance = 0.0f);
 
 private:
     MatteModel whole_;

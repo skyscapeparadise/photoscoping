@@ -36,6 +36,9 @@ public:
     void set_matted(const std::vector<bool>& matted);
     // The frames hand-made fixes have keys on: marked under the matte line.
     void set_keys(const std::vector<std::int64_t>& frames);
+    // The frames the clean plate is made from, first to last; -1 for none.
+    // A faint band down the ruler behind them.
+    void set_plate(std::int64_t first, std::int64_t last);
 
     std::function<void(std::int64_t)> on_seek;
     std::function<void(bool)> on_play;   // true to play, false to pause
@@ -63,6 +66,7 @@ private:
     std::int64_t frame_ = 0;
     std::vector<bool> matted_;
     std::vector<std::int64_t> keys_;
+    std::int64_t plate_first_ = -1, plate_last_ = -1;
     bool playing_ = false;
     bool fit_pending_ = false;
 

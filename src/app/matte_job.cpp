@@ -56,6 +56,8 @@ bool MatteJob::start(Kind kind, const std::string& clip, const std::string& lut,
     std::vector<std::string> args = {app_, clip};
     if (kind == Kind::kExport) {
         args.insert(args.end(), {"--mattes", out, "--export-clip", export_to, "--export-format", format});
+    } else if (kind == Kind::kPlate) {
+        args.insert(args.end(), {"--plate-clip", out});
     } else {
         args.insert(args.end(), {rematte ? "--rematte-clip" : "--matte-clip", out});
     }
@@ -70,7 +72,10 @@ bool MatteJob::start(Kind kind, const std::string& clip, const std::string& lut,
 
     // Everything the run says goes to a log beside its output rather than
     // into this process's terminal, where it would interleave with ours.
-    const char* suffix = kind == Kind::kExport ? "_export.log" : rematte ? "_rematte.log" : "_matte.log";
+    const char* suffix = kind == Kind::kExport  ? "_export.log"
+                         : kind == Kind::kPlate ? "_plate.log"
+                         : rematte              ? "_rematte.log"
+                                                : "_matte.log";
     const std::string log_path = (fs::path(out) / (name + suffix)).string();
     log_path_ = log_path;
     log_ = SDL_IOFromFile(log_path.c_str(), "w");
@@ -103,7 +108,11 @@ bool MatteJob::start(Kind kind, const std::string& clip, const std::string& lut,
     }
     kind_ = kind;
     SDL_Log("%s %s into %s (log: %s)",
-            kind == Kind::kExport ? "exporting" : rematte ? "re-matting" : "matting", clip.c_str(),
+            kind == Kind::kExport  ? "exporting"
+            : kind == Kind::kPlate ? "making the plate for"
+            : rematte              ? "re-matting"
+                                   : "matting",
+            clip.c_str(),
             kind == Kind::kExport ? export_to.c_str() : out.c_str(), log_path.c_str());
     return true;
 }

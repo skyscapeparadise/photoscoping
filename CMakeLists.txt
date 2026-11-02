@@ -135,6 +135,7 @@ add_library(photoscoping_matting STATIC
     src/matting/closed_form.cpp
     src/matting/foreground.cpp
     src/matting/png16.cpp
+    src/matting/plate.cpp
 )
 target_include_directories(photoscoping_matting PUBLIC src)
 # zlib for the 16-bit PNG writer: the system's on macOS and Linux. Windows

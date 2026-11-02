@@ -90,6 +90,29 @@ viewer blends it into the matte, feathered in from the box's edge, before
 garbage mattes and paint apply. Moving a box only re-mattes the frames it
 moved on, and each run clears away the patches no box wants any more. `--rematte-clip DIR` runs it headless.
 
+A clean plate, optional, makes a locked-off shot's edges and colour better.
+Clip > Start Clean Plate Here and End Clean Plate Here (Command-[ and
+Command-]) mark a stretch of the clip where the set is empty; up to sixteen of
+its frames are averaged into `renders/<clip>_plate_<first>_<last>.png` in the
+background, and the frames show as a faint band on the ruler. Each frame then
+relights the plate from its own visible wall -- following a strobe's level and
+the subject's soft shadows -- and the matte is refined with it: around the
+edge, what matches the wall is solved as wall, and the wall's true colour says
+how far the edge solve can be trusted. Exports and the subject view work out
+the subject's colour from the wall exactly, so a dark, motion-blurred edge
+loses the wall's grey halo. The refined mattes go in a folder of their own,
+named for the plate, and the stack's own are untouched -- Clear Clean Plate
+shows them again. The pill refines a matted clip; matting a clip with a plate
+set refines as it goes.
+
+Plate Corrects the Matte (Clip menu) lets the plate overrule the model too.
+Wall the matte kept as subject goes, if it shows the plate's own plaster grain
+in place, reached from the open wall; a hole in the subject is filled only if
+its colour is one no shadow on the wall could make. A grey subject on a grey
+wall is beyond it either way -- for those, paint. It stands down on frames too
+far out of focus for the wall's grain to show, and on close-ups with no open
+wall.
+
 File > Export Subject writes the matted subject with its alpha: ProRes 4444
 (Command-E, the default), VP9 in WebM, or a folder of 16-bit RGBA PNGs. File >
 Export Matte writes the matte alone, white on black: ProRes 422, ProRes 422
@@ -103,7 +126,8 @@ the subject is solid it comes out as it went in. Everything is tagged Rec.709,
 video range. HEVC and H.264 use the Mac's own encoders; ProRes is FFmpeg's,
 VP9 libvpx's. A stopped export leaves only a `.partial` file.
 `--export-clip PATH --export-format ID --mattes DIR` runs it headless
-(`--export-range A:B` for part of the clip).
+(`--range A:B` for part of the clip). `--plate-clip DIR` makes the plate
+headless.
 
 The viewer shows a matte four ways: the footage, the matte, the matted subject
 over a checkerboard, or the footage washed purple wherever the matte drops it.

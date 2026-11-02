@@ -10,6 +10,7 @@
 }
 - (void)openDocument:(id)sender;
 - (void)exportAs:(id)sender;
+- (void)plateAction:(id)sender;
 @end
 
 @implementation PSFileMenuTarget
@@ -20,9 +21,21 @@
 - (void)exportAs:(id)sender {
     if (actions_.export_as) actions_.export_as(actions_.context, (int)[sender tag]);
 }
+- (void)plateAction:(id)sender {
+    if (actions_.plate) actions_.plate(actions_.context, (int)[sender tag]);
+}
 - (BOOL)validateMenuItem:(NSMenuItem*)item {
     if ([item action] == @selector(exportAs:))
         return actions_.can_export && actions_.can_export(actions_.context);
+    if ([item action] == @selector(plateAction:)) {
+        const int state = actions_.plate_state ? actions_.plate_state(actions_.context) : 0;
+        const long tag = [item tag];
+        if (tag == ps::app::kPlateCorrect)
+            [item setState:(state & ps::app::kPlateCorrects) ? NSControlStateValueOn : NSControlStateValueOff];
+        if (!(state & ps::app::kPlateClipOpen)) return NO;
+        if (tag == ps::app::kPlateClear || tag == ps::app::kPlateCorrect) return (state & ps::app::kPlateIsSet) != 0;
+        return YES;
+    }
     return YES;
 }
 @end
@@ -79,6 +92,30 @@ bool install_file_menu(const FileMenuActions& actions) {
     [holder setSubmenu:file];
     // After the application menu, which is always first.
     [bar insertItem:holder atIndex:MIN(1, [bar numberOfItems])];
+
+    NSMenu* clip = [[NSMenu alloc] initWithTitle:@"Clip"];
+    struct Entry { NSString* title; int action; NSString* key; };
+    const Entry entries[] = {
+        {@"Start Clean Plate Here", kPlateStart, @"["},
+        {@"End Clean Plate Here", kPlateEnd, @"]"},
+        {@"Clear Clean Plate", kPlateClear, @""},
+        {nil, -1, nil},
+        {@"Plate Corrects the Matte", kPlateCorrect, @""},
+    };
+    for (const Entry& e : entries) {
+        if (!e.title) {
+            [clip addItem:[NSMenuItem separatorItem]];
+            continue;
+        }
+        NSMenuItem* entry = [[NSMenuItem alloc] initWithTitle:e.title action:@selector(plateAction:)
+                                                keyEquivalent:e.key];
+        [entry setTag:e.action];
+        [entry setTarget:g_target];
+        [clip addItem:entry];
+    }
+    NSMenuItem* clip_holder = [[NSMenuItem alloc] initWithTitle:@"Clip" action:nil keyEquivalent:@""];
+    [clip_holder setSubmenu:clip];
+    [bar insertItem:clip_holder atIndex:MIN(2, [bar numberOfItems])];
     return true;
 }
 

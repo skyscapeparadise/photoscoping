@@ -107,6 +107,12 @@ bool write_png16_rgba(const std::string& path, const std::vector<std::uint16_t>&
 }
 
 bool read_png16(const std::string& path, std::vector<float>* values, int* width, int* height) {
+    int channels = 0;
+    return read_png16_planes(path, values, width, height, &channels) && channels == 1;
+}
+
+bool read_png16_planes(const std::string& path, std::vector<float>* values, int* width, int* height,
+                       int* channels_out) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return false;
     std::vector<std::uint8_t> file;
@@ -137,11 +143,12 @@ bool read_png16(const std::string& path, std::vector<float>* values, int* width,
         }
         at += 12 + size;
     }
-    // Greyscale, 8 or 16 bits, not interlaced: what the stack writes, and
-    // what anything else making a matte would.
-    if (type != 0 || (depth != 8 && depth != 16) || interlace != 0 || w <= 0 || h <= 0) return false;
+    // Greyscale, RGB or RGBA, 8 or 16 bits, not interlaced: what the stack
+    // writes, and what anything else making a matte or a plate would.
+    const int channels = type == 0 ? 1 : type == 2 ? 3 : type == 6 ? 4 : 0;
+    if (!channels || (depth != 8 && depth != 16) || interlace != 0 || w <= 0 || h <= 0) return false;
 
-    const int bpp = depth / 8;
+    const int bpp = depth / 8 * channels;
     const std::size_t row_bytes = static_cast<std::size_t>(w) * bpp;
     std::vector<std::uint8_t> raw((row_bytes + 1) * h);
     uLongf raw_size = static_cast<uLongf>(raw.size());
@@ -151,7 +158,8 @@ bool read_png16(const std::string& path, std::vector<float>* values, int* width,
 
     // Unfiltered in place, each row against the one above.
     std::vector<std::uint8_t> previous(row_bytes, 0);
-    values->resize(static_cast<std::size_t>(w) * h);
+    const std::size_t pixels = static_cast<std::size_t>(w) * h;
+    values->resize(pixels * channels);
     for (int y = 0; y < h; ++y) {
         std::uint8_t* row = &raw[y * (row_bytes + 1) + 1];
         const int filter = row[-1];
@@ -171,14 +179,18 @@ bool read_png16(const std::string& path, std::vector<float>* values, int* width,
             row[i] = static_cast<std::uint8_t>(row[i] + add);
         }
         std::copy(row, row + row_bytes, previous.begin());
-        for (int x = 0; x < w; ++x) {
-            const float v = depth == 16 ? ((row[x * 2] << 8) | row[x * 2 + 1]) / 65535.0f
-                                        : row[x] / 255.0f;
-            (*values)[static_cast<std::size_t>(y) * w + x] = v;
-        }
+        // Planar out: every pixel's first channel, then its second.
+        for (int x = 0; x < w; ++x)
+            for (int c = 0; c < channels; ++c) {
+                const int i = x * channels + c;
+                const float v = depth == 16 ? ((row[i * 2] << 8) | row[i * 2 + 1]) / 65535.0f
+                                            : row[i] / 255.0f;
+                (*values)[c * pixels + static_cast<std::size_t>(y) * w + x] = v;
+            }
     }
     *width = w;
     *height = h;
+    *channels_out = channels;
     return true;
 }
 

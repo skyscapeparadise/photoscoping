@@ -14,6 +14,7 @@
 #include "editor/theme.hpp"
 #include "fixes/mask.hpp"
 #include "media/export_format.hpp"
+#include "matting/plate.hpp"
 
 namespace ps::app {
 
@@ -125,6 +126,7 @@ editor::ClipInfo clip_info(const std::string& name, const media::VideoDecoder& d
     // Filled in from what has been matted.
     info.rows.emplace_back("matte", "none");
     info.rows.emplace_back("re-matte", "none");
+    info.rows.emplace_back("plate", "none");
     info.rows.emplace_back("export", "none");
     return info;
 }
@@ -301,6 +303,7 @@ bool EditorApp::open_clip(const std::string& path, std::int64_t frame) {
     history_.clear();
     patches_.set_fixes(fixes_);
     fixes_changed(/*save=*/false);
+    update_plate();
     refresh_matte_ui();
     SDL_Log("opened %s", path.c_str());
     return true;
@@ -339,6 +342,8 @@ void EditorApp::install_menu() {
             [](void* self) { static_cast<EditorApp*>(self)->show_open_dialog(); },
             [](void* self, int format) { static_cast<EditorApp*>(self)->show_export_dialog(format); },
             [](void* self) { return static_cast<EditorApp*>(self)->can_export(); },
+            [](void* self, int action) { static_cast<EditorApp*>(self)->plate_action(action); },
+            [](void* self) { return static_cast<EditorApp*>(self)->plate_state(); },
         });
 #endif
 }
@@ -362,8 +367,84 @@ void EditorApp::show_open_dialog() {
 }
 
 bool EditorApp::can_export() const {
+    // Every frame matted -- and refined by the plate, if there is one: an
+    // export is of the matte as the viewer shows it.
     return clip_.is_open() && job_.available() && !job_.running() && clip_.frame_count() > 0 &&
-           frames_.done_count() >= clip_.frame_count();
+           frames_.done_count() >= clip_.frame_count() &&
+           (!fixes_.plate.set() || frames_.refined_count() >= clip_.frame_count());
+}
+
+void EditorApp::plate_action(int action) {
+    if (!clip_.is_open()) return;
+    const std::int64_t at = std::max<std::int64_t>(shown_, 0);
+    fixes::PlateRange plate = fixes_.plate;
+    switch (action) {
+        case kPlateStart:
+            if (!plate.set()) plate = fixes::PlateRange{at, at, false};
+            plate.first = at;
+            plate.last = std::max(plate.last, at);
+            break;
+        case kPlateEnd:
+            if (!plate.set()) plate = fixes::PlateRange{at, at, false};
+            plate.last = at;
+            plate.first = std::min(plate.first, at);
+            break;
+        case kPlateClear: plate = fixes::PlateRange{}; break;
+        case kPlateCorrect:
+            if (!plate.set()) return;
+            plate.correct = !plate.correct;
+            break;
+        default: return;
+    }
+    if (plate == fixes_.plate) return;
+    history_.record(fixes_);
+    fixes_.plate = plate;
+    fixes_changed(/*save=*/true);
+}
+
+int EditorApp::plate_state() const {
+    int state = 0;
+    if (clip_.is_open()) state |= kPlateClipOpen;
+    if (fixes_.plate.set()) state |= kPlateIsSet;
+    if (fixes_.plate.correct) state |= kPlateCorrects;
+    return state;
+}
+
+std::string EditorApp::plate_image_path() const {
+    return (std::filesystem::path(options_.render_dir) / fixes::plate_image_name(clip_name_, fixes_.plate))
+        .string();
+}
+
+bool EditorApp::plate_image_ready() const {
+    std::error_code ec;
+    return fixes_.plate.set() && std::filesystem::exists(plate_image_path(), ec);
+}
+
+void EditorApp::start_plate_job() {
+    if (!clip_.is_open() || !fixes_.plate.set() || plate_image_ready()) {
+        plate_wanted_ = false;
+        return;
+    }
+    if (job_.running() || !job_.available()) {
+        plate_wanted_ = job_.available();
+        return;
+    }
+    plate_wanted_ = false;
+    if (job_.start(MatteJob::Kind::kPlate, clip_.path(), options_.lut_path, options_.render_dir,
+                   clip_name_))
+        job_started_ns_ = SDL_GetTicksNS();
+}
+
+void EditorApp::update_plate() {
+    const fixes::PlateRange& plate = fixes_.plate;
+    // The refined mattes, where there are any; the stack's own elsewhere.
+    frames_.set_preferred(plate.set() ? (std::filesystem::path(options_.render_dir) /
+                                         fixes::plate_mattes_name(clip_name_, plate))
+                                            .string()
+                                      : std::string());
+    root_.timeline()->set_plate(plate.set() ? plate.first : -1, plate.set() ? plate.last : -1);
+    ++subject_version_;
+    start_plate_job();
 }
 
 void EditorApp::show_export_dialog(int format_index) {
@@ -500,7 +581,7 @@ void EditorApp::refresh_matte_ui() {
     frames_.set_keep_coverage(estimating_subject());
 
     std::string row = "none";
-    if (job_.running() && job_.kind() == MatteJob::Kind::kMatte) {
+    if (job_.running() && job_.kind() == MatteJob::Kind::kMatte && !complete) {
         row = std::to_string(done) + " of " + std::to_string(total);
         const double elapsed = (SDL_GetTicksNS() - job_started_ns_) / 1e9;
         const std::int64_t made = done - done_at_start_;
@@ -543,6 +624,32 @@ void EditorApp::refresh_matte_ui() {
     }
     inspector->set_row("export", export_row);
 
+    // The clean plate: its frames, and how far the mattes are refined by it.
+    const fixes::PlateRange& plate = fixes_.plate;
+    const std::int64_t refined = frames_.refined_count();
+    std::string plate_row = "none";
+    if (plate.set()) {
+        plate_row = "frames " + std::to_string(plate.first) +
+                    (plate.last > plate.first ? "\xE2\x80\x93" + std::to_string(plate.last) : "") +
+                    (plate.correct ? " \xC2\xB7 override" : "");
+        if (job_.running() && job_.kind() == MatteJob::Kind::kPlate) {
+            plate_row = "making the plate";
+        } else if (!plate_image_ready()) {
+            plate_row += " \xC2\xB7 waiting";
+        } else if (job_.running() && job_.kind() == MatteJob::Kind::kMatte && complete) {
+            const double elapsed = (SDL_GetTicksNS() - job_started_ns_) / 1e9;
+            const std::int64_t since = refined - refined_at_start_;
+            plate_row = std::to_string(refined) + " of " + std::to_string(total) + " refined";
+            if (since > 0) plate_row += " \xC2\xB7 " + time_left((total - refined) * elapsed / since);
+        } else if (done > 0 && refined == 0) {
+            plate_row += " \xC2\xB7 not refined yet";
+        } else if (done > 0 && refined < done) {
+            plate_row += " \xC2\xB7 " + std::to_string(refined) + " refined";
+        }
+    }
+    inspector->set_row("plate", plate_row);
+    const bool refine_wanted = plate.set() && complete && refined < total;
+
     const std::size_t to_make = patches_.frames_to_make();
     if (exporting) {
         inspector->set_action("stop exporting", true);
@@ -561,8 +668,13 @@ void EditorApp::refresh_matte_ui() {
         inspector->set_action("matte clip", false);
     else if (rematting)
         inspector->set_action("stop re-matting", true);
+    else if (job_.running() && job_.kind() == MatteJob::Kind::kPlate)
+        inspector->set_action("making the plate", false);
     else if (job_.running())
-        inspector->set_action("stop matting", true);
+        inspector->set_action(complete && plate.set() ? "stop refining" : "stop matting", true);
+    else if (refine_wanted)
+        inspector->set_action("refine " + std::to_string(total - refined) + " frames with the plate",
+                              plate_image_ready());
     else if (done > 0 && !complete)
         inspector->set_action("resume matting", true);
     else if (source_ != MatteSource::kNone)
@@ -591,6 +703,7 @@ void EditorApp::toggle_job() {
                        options_.render_dir, clip_name_)) {
             job_started_ns_ = SDL_GetTicksNS();
             done_at_start_ = frames_.done_count();
+            refined_at_start_ = frames_.refined_count();
         }
     }
     frames_.rescan();
@@ -611,17 +724,26 @@ void EditorApp::poll_job() {
     const bool rematting = job_.kind() == MatteJob::Kind::kRematte;
     const bool exporting = job_.kind() == MatteJob::Kind::kExport;
     if ((rematting || exporting) && patches_.rescan()) ++subject_version_;
-    else if (frames_.rescan() && frames_.matted(shown_) && frames_.shown() != shown_) frames_.refresh();
+    else if (frames_.rescan() &&
+             ((frames_.matted(shown_) && frames_.shown() != shown_) || frames_.shown_outdated(shown_))) {
+        frames_.refresh();
+        ++subject_version_;
+    }
     bool succeeded = false;
     if (job_.poll_finished(&succeeded)) {
         if (rematting || exporting) patches_.rescan();
         if (exporting) export_status_ = succeeded ? export_to_ : "failed; see the log";
+        const bool plating = job_.kind() == MatteJob::Kind::kPlate;
         if (!succeeded)
             SDL_Log("the %s stopped short; see %s",
-                    exporting ? "export" : rematting ? "re-matte" : "matting",
+                    exporting ? "export" : rematting ? "re-matte" : plating ? "plate" : "matting",
                     job_.log_path().c_str());
         // Finished, the new videos are in place and newer than the frames.
         choose_matte_source();
+        if (plating) ++subject_version_;
+        // A plate asked for while this ran is made now -- once: a plate run
+        // that failed is not retried until the plate changes again.
+        if (!plating && plate_wanted_) start_plate_job();
     }
     refresh_matte_ui();
 }
@@ -633,6 +755,7 @@ void EditorApp::fixes_changed(bool save) {
     // Which patches the boxes want; a moved box wants new ones.
     patches_.set_fixes(fixes_);
     ++subject_version_;
+    update_plate();
     refresh_matte_ui();
     // A file that would not read is never written over: whatever is in it
     // may be the only copy of someone's work.
@@ -877,6 +1000,7 @@ void EditorApp::request_subject() {
         in.patch_rect = patches_.rect();
     }
     in.fixes = fixes_;
+    if (plate_image_ready()) in.plate_path = plate_image_path();
     subject_est_.request(std::move(in));
 }
 

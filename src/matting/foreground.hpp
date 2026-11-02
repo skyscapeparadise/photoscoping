@@ -20,4 +20,14 @@ std::vector<float> estimate_foreground_ml(const std::vector<float>& image,
                                           const std::vector<float>& alpha, int width,
                                           int height);
 
+// The same, when the wall behind is known -- a clean plate relit for the frame,
+// interleaved like the image. Since image = alpha * fg + (1 - alpha) * wall,
+// the foreground follows from the two directly wherever alpha is enough to
+// divide by; the estimate above stands in where it is too faint for that,
+// and the two are blended between.
+std::vector<float> estimate_foreground_known(const std::vector<float>& image,
+                                             const std::vector<float>& alpha,
+                                             const std::vector<float>& wall, int width,
+                                             int height);
+
 }  // namespace ps::matting
