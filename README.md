@@ -130,6 +130,18 @@ HEVC, ProRes 422, 422 LT or 4444, H.264, VP9, or PNG or EXR sequences. Its
 settings: Linear Light (the default) or Graded Look; Fill the Performer's
 Shadow; Size: the crop's own, a preset or a custom long side.
 
+Linear Light is the light that fell on the camera, not the look a LUT puts on
+it. When the clip's LUT says what it expects -- Canon's do, in their headers
+and names ("Cinema Gamut to ...", "Canon Log 3 to ...") -- each frame is decoded
+a second time for the light maps, straight from the camera's log by Canon's
+own formulas (Canon Log, Log 2 and Log 3, checked against Canon's 1D
+log-to-linear LUTs) and its gamut, while the matte is made from the LUT'd
+image as before. Without such a LUT, linear light is decoded by the file's
+tags. A white board that reads 0.76 through a Wide DR LUT is 2.9 as scene light
+-- the board's real brightness against the rest of the shot. The sidecar and
+the preview's caption both say which decode was used; Graded Look is the LUT'd
+image, as the viewer shows it.
+
 Where the performer passes in front of a crop, the backdrop behind them is
 filled in: a smooth surface fitted to the backdrop around the crop (with a
 clean plate, the plate under the frame's own light), matched to the real

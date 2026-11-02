@@ -30,6 +30,13 @@ enum class Transfer {
     kGamma26,   // DCI cinema
     kLinear,
     kSrgb,      // IEC 61966-2-1: what an image tool writes, and our own renders
+    // Canon's logs, to scene light: 0.18 is 18% grey, 1.0 a white of 100%
+    // reflectance, highlights well past it. Canon's own formulas, which match
+    // its 1D log-to-linear LUTs exactly -- Log 3 on the full-range code
+    // value, Log and Log 2 on the video-range one (64 black, 940 white).
+    kCanonLog,
+    kCanonLog2,
+    kCanonLog3,
 };
 
 const char* gamut_name(Gamut gamut);

@@ -34,6 +34,11 @@ InputTransform transform_from_tags(const media::SignalInfo& signal);
 // The transform for a clip seen through `lut`, or through its tags when that
 // is null.
 InputTransform transform_for(const media::SignalInfo& signal, const color::CubeLut* lut);
+// The clip as the light that fell on the camera, no LUT: decoded from the
+// camera log the LUT says it expects (Canon's do), or by the file's tags.
+// Whether it found a log to decode is in `from_log`.
+InputTransform scene_transform_for(const media::SignalInfo& signal, const color::CubeLut* lut,
+                                   bool* from_log = nullptr);
 
 // Uploads a decoded frame's planes and converts them into the working image:
 // linear light, Rec.2020, 1.0 = reference white, at the source's resolution.
@@ -56,6 +61,14 @@ public:
     bool process(SDL_GPUCommandBuffer* cmd, const media::VideoDecoder& frame,
                  const InputTransform& transform);
 
+    // The planes process() last uploaded, converted again with another
+    // transform into a second image -- the same frame seen two ways: through
+    // the LUT for matting and the eye, and as scene light for light maps.
+    bool process_again(SDL_GPUCommandBuffer* cmd, const InputTransform& transform);
+    SDL_GPUTexture* scene() const { return scene_; }
+    std::vector<float> read_scene();
+    std::vector<std::uint16_t> read_scene_raw();
+
     SDL_GPUTexture* working() const { return working_; }
     Uint32 width() const { return width_; }
     Uint32 height() const { return height_; }
@@ -67,6 +80,8 @@ public:
     std::vector<std::uint16_t> read_working_raw();
 
 private:
+    bool convert(SDL_GPUCommandBuffer* cmd, const InputTransform& transform, SDL_GPUTexture* into);
+    std::vector<std::uint16_t> read_raw(SDL_GPUTexture* texture);
     bool ensure_textures(const media::VideoDecoder& frame);
     void release_frame_textures();
 
@@ -78,6 +93,11 @@ private:
     SDL_GPUTransferBuffer* upload_ = nullptr;
     Uint32 upload_size_ = 0;
     SDL_GPUTexture* working_ = nullptr;
+    SDL_GPUTexture* scene_ = nullptr;
+    // The uploaded planes' layout, for converting them again.
+    int bit_depth_ = 8;
+    float sample_scale_ = 1.0f;
+    bool uploaded_ = false;
     SDL_GPUTexture* lut_texture_ = nullptr;
     // Bound in place of a LUT when there is none, because every sampler slot
     // a shader declares must be bound.

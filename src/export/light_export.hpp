@@ -19,6 +19,12 @@ struct LightRequest {
     bool model_cpu = false;
     std::int64_t first = 0;
     std::int64_t last = -1;  // the whole clip when < 0
+    // Linear light is the clip decoded with this, no LUT: from the camera's
+    // log, when the LUT says what it expects (`scene_from_log`), else by the
+    // file's tags. gpu::scene_transform_for() makes it.
+    gpu::InputTransform scene;
+    bool scene_from_log = false;
+    std::string scene_name;  // "Canon Log 3, Cinema Gamut", for the sidecar
 };
 
 // The clip's light maps (light/light_map.hpp), every crop in its fixes at

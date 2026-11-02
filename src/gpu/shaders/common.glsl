@@ -8,6 +8,9 @@ const int kTransferHlg = 2;
 const int kTransferGamma26 = 3;
 const int kTransferLinear = 4;
 const int kTransferSrgb = 5;
+const int kTransferCanonLog = 6;
+const int kTransferCanonLog2 = 7;
+const int kTransferCanonLog3 = 8;
 
 const float kReferenceWhiteNits = 203.0;
 
@@ -52,8 +55,31 @@ vec3 srgb_oetf(vec3 linear) {
     return mix(l * 12.92, 1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), l));
 }
 
+// Canon's logs to scene light (color_space.hpp has the why of each).
+vec3 canon_log3(vec3 x) {
+    vec3 below = -(pow(vec3(10.0), (0.12783901 - x) / 0.36726845) - 1.0) / 14.98325;
+    vec3 toe = (x - 0.12512219) / 1.9754798;
+    vec3 above = (pow(vec3(10.0), (x - 0.12240537) / 0.36726845) - 1.0) / 14.98325;
+    return mix(mix(below, toe, step(vec3(0.097465473), x)), above, step(vec3(0.15277891) + 1e-7, x));
+}
+vec3 canon_log2(vec3 signal) {
+    vec3 x = (signal * 1023.0 - 64.0) / 876.0;
+    vec3 below = -(pow(vec3(10.0), (0.035388128 - x) / 0.281864443) - 1.0) / 87.09937546;
+    vec3 above = (pow(vec3(10.0), (x - 0.035388128) / 0.281864443) - 1.0) / 87.09937546;
+    return mix(below, above, step(vec3(0.092864125), x));
+}
+vec3 canon_log(vec3 signal) {
+    vec3 x = (signal * 1023.0 - 64.0) / 876.0;
+    vec3 below = -(pow(vec3(10.0), (0.0730597 - x) / 0.529136) - 1.0) / 10.1596;
+    vec3 above = (pow(vec3(10.0), (x - 0.0730597) / 0.529136) - 1.0) / 10.1596;
+    return mix(below, above, step(vec3(0.0730597), x));
+}
+
 // Encoded signal -> linear light, 1.0 = reference white.
 vec3 decode_transfer(vec3 signal, int transfer) {
+    if (transfer == kTransferCanonLog3) return canon_log3(signal);
+    if (transfer == kTransferCanonLog2) return canon_log2(signal);
+    if (transfer == kTransferCanonLog) return canon_log(signal);
     if (transfer == kTransferPq) return pq_to_relative(signal);
     if (transfer == kTransferHlg) return hlg_to_relative(signal);
     if (transfer == kTransferGamma26) return pow(max(signal, vec3(0.0)), vec3(2.6));

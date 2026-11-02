@@ -63,6 +63,24 @@ std::optional<std::string> comment_field(std::string_view comment, std::string_v
     return std::string(trim(body.substr(1)));
 }
 
+// The part before " to " in "Canon Log 3 to Wide DR".
+std::string before_to(const std::string& s) {
+    const std::string l = lower(s);
+    const auto at = l.find(" to ");
+    return at == std::string::npos ? std::string() : s.substr(0, at);
+}
+
+// A camera log, by name: "Canon Log 3", "CanonLog3".
+std::optional<Transfer> log_from(const std::string& text) {
+    std::string s;
+    for (char c : lower(text))
+        if (c != ' ') s += c;
+    if (contains(s, "canonlog3")) return Transfer::kCanonLog3;
+    if (contains(s, "canonlog2")) return Transfer::kCanonLog2;
+    if (contains(s, "canonlog")) return Transfer::kCanonLog;
+    return std::nullopt;
+}
+
 // The part after " to " in "Cinema Gamut to BT.2020".
 std::string after_to(const std::string& s) {
     const std::string l = lower(s);
@@ -97,6 +115,16 @@ std::optional<Transfer> transfer_from(const std::string& text) {
 void read_canon_file_name(const std::string& file_name, CubeLut& lut) {
     const auto to = file_name.find("-to-");
     if (to == std::string::npos) return;
+    // Input gamut and gamma, before "-to-": CinemaGamut_CanonLog3.
+    if (!lut.input) {
+        const std::string in = file_name.substr(0, to);
+        const auto underscore = in.find('_');
+        if (underscore != std::string::npos) {
+            const auto gamut = gamut_from(in.substr(0, underscore));
+            const auto log = log_from(in.substr(underscore + 1));
+            if (gamut && log) lut.input = LutOutput{*gamut, *log, in.substr(underscore + 1)};
+        }
+    }
     std::vector<std::string> parts;
     std::stringstream ss(file_name.substr(to + 4));
     for (std::string part; std::getline(ss, part, '_');) parts.push_back(part);
@@ -214,6 +242,9 @@ std::optional<CubeLut> parse_cube(const std::string& text, const std::string& fi
         const auto gamut = gamut_from(after_to(*canon_gamut));
         const auto transfer = transfer_from(curve);
         if (gamut && transfer) lut.output = LutOutput{*gamut, *transfer, curve};
+        const auto in_gamut = gamut_from(before_to(*canon_gamut));
+        const auto in_log = log_from(before_to(*canon_gamma));
+        if (in_gamut && in_log) lut.input = LutOutput{*in_gamut, *in_log, before_to(*canon_gamma)};
     }
     read_canon_file_name(file_name, lut);
     return lut;

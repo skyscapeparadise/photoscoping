@@ -191,6 +191,46 @@ void test_canon_header() {
                                   "CinemaGamut_CanonLog3-to-DCIP3_DCI_65_FF_Ver.2.0.cube", &error);
     CHECK(named && named->output && named->output->gamut == Gamut::kDciP3 &&
           named->output->transfer == Transfer::kGamma26 && named->full_range_in.value_or(false));
+
+    // And what they expect as input: the camera's log and gamut, from the
+    // header or, failing that, the name.
+    CHECK(lut->input && lut->input->gamut == Gamut::kCinemaGamut &&
+          lut->input->transfer == Transfer::kCanonLog3);
+    CHECK(named && named->input && named->input->gamut == Gamut::kCinemaGamut &&
+          named->input->transfer == Transfer::kCanonLog3);
+    const auto log2 = parse_cube(identity_cube(2, ""), "BT709_CanonLog2-to-BT709_WideDR_65_FF_Ver.2.0.cube", &error);
+    CHECK(log2 && log2->input && log2->input->gamut == Gamut::kRec709 &&
+          log2->input->transfer == Transfer::kCanonLog2);
+    const auto plain = parse_cube(identity_cube(2, ""), "warm_look.cube", &error);
+    CHECK(plain && !plain->input);
+}
+
+// Canon's logs, against Canon's own 10-bit log-to-linear 1D LUTs: the code
+// value, and what Canon's table says it is in scene light.
+void test_canon_logs() {
+    const struct {
+        Transfer transfer;
+        int code;
+        float linear;
+    } kCanon[] = {
+        {Transfer::kCanonLog3, 0, -0.082015f},   {Transfer::kCanonLog3, 128, 0.0f},
+        {Transfer::kCanonLog3, 339, 0.180651f},  {Transfer::kCanonLog3, 512, 0.647493f},
+        {Transfer::kCanonLog3, 768, 3.362573f},  {Transfer::kCanonLog3, 1023, 16.298113f},
+        {Transfer::kCanonLog2, 0, -0.016363f},   {Transfer::kCanonLog2, 339, 0.100254f},
+        {Transfer::kCanonLog2, 512, 0.549367f},  {Transfer::kCanonLog2, 1023, 65.816113f},
+        {Transfer::kCanonLog, 0, -0.087467f},    {Transfer::kCanonLog, 339, 0.182329f},
+        {Transfer::kCanonLog, 768, 2.266685f},   {Transfer::kCanonLog, 1023, 8.295909f},
+    };
+    for (const auto& c : kCanon) {
+        const float got = decode_channel(c.transfer, static_cast<float>(c.code) / 1023.0f);
+        // Within a hundredth of a percent: Log 2's published constants land
+        // 0.004% off Canon's own table at its very top.
+        const bool ok = std::fabs(got - c.linear) <= 1e-4f + 1e-4f * std::fabs(c.linear);
+        if (!ok)
+            std::printf("  %s at code %d: %f, Canon says %f\n", transfer_name(c.transfer), c.code, got,
+                        c.linear);
+        CHECK(ok);
+    }
 }
 
 // Kady's real ingest LUTs: every one must load and be recognised.
@@ -233,6 +273,7 @@ int main() {
     test_ycbcr();
     test_cube_parsing();
     test_canon_header();
+    test_canon_logs();
     test_installed_canon_luts();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);

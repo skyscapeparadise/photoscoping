@@ -38,6 +38,11 @@ struct CubeLut {
     // assumed to be either; the caller decides and says so.
     std::optional<bool> full_range_in;
     std::optional<LutOutput> output;
+    // What it expects to be given -- a camera's log and gamut, for Canon's
+    // ("Cinema Gamut to ...", "Canon Log 3 to ...") -- so the footage can be
+    // decoded to scene light without it: light maps want the light itself,
+    // not the look the LUT puts on it. Unknown for LUTs that do not say.
+    std::optional<LutOutput> input;
     // Every '#' comment line, verbatim, for showing the user what the file
     // says about itself.
     std::vector<std::string> comments;

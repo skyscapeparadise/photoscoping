@@ -113,14 +113,27 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
                     (SDL_GetTicksNS() - t) / 1e9, per * static_cast<double>(steps - step) / 60.0);
         std::fflush(stdout);
     };
+    // Each frame two ways: as the LUT shows it, which the matte is made from
+    // (and the look), and as scene light, for linear light.
+    std::vector<float> scene_light;  // planar linear Rec.709, the frame read last
     auto read_frame = [&](std::int64_t f, bool seek) -> std::unique_ptr<matting::MattingFrame> {
         if (seek ? !decoder.seek_frame(f) : !decoder.read_next()) return nullptr;
         SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
-        const bool ingested = ingest.process(cmd, decoder, transform);
+        bool ingested = ingest.process(cmd, decoder, transform);
+        if (ingested && settings.linear) ingested = ingest.process_again(cmd, request.scene);
         SDL_SubmitGPUCommandBuffer(cmd);
         if (!ingested) return nullptr;
-        return std::make_unique<matting::MattingFrame>(matting::prepare_frame(
+        auto frame = std::make_unique<matting::MattingFrame>(matting::prepare_frame(
             ingest.read_working(), static_cast<int>(ingest.width()), static_cast<int>(ingest.height())));
+        if (settings.linear)
+            scene_light = matting::prepare_frame(ingest.read_scene(), static_cast<int>(ingest.width()),
+                                                 static_cast<int>(ingest.height()))
+                              .linear;
+        return frame;
+    };
+    // The light the maps are made of.
+    auto light_of = [&](const matting::MattingFrame& frame) -> const std::vector<float>& {
+        return settings.linear ? scene_light : frame.linear;
     };
 
     float scale = 1.0f;
@@ -138,7 +151,7 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
             const std::vector<float> alpha = read_shown_matte(request.render_dir, stem, fixes, f, w, h);
             for (const auto& out : outputs) {
                 const light::Homography hm = light::quad_homography(out->crop->at(f), out->width, out->height);
-                const std::vector<float> rgb = light::warp(frame->linear, 3, w, h, hm, out->width, out->height);
+                const std::vector<float> rgb = light::warp(light_of(*frame), 3, w, h, hm, out->width, out->height);
                 const std::vector<float> a =
                     alpha.empty() ? std::vector<float>(static_cast<std::size_t>(out->width) * out->height, 0.0f)
                                   : light::warp(alpha, 1, w, h, hm, out->width, out->height);
@@ -190,8 +203,11 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
             return false;
         }
 
+        // The plate was made as the LUT shows the set; against scene light it
+        // still serves, the smooth surface fitted to the ratio taking up the
+        // difference across a crop's backdrop.
         const light::FrameLight fl = light::prepare_frame_light(
-            frame->linear, alpha, w, h, plate.empty() ? nullptr : &plate.linear, settings.fill_shadows);
+            light_of(*frame), alpha, w, h, plate.empty() ? nullptr : &plate.linear, settings.fill_shadows);
 
         for (const auto& out : outputs) {
             const int ow = out->width, oh = out->height;
@@ -274,6 +290,9 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
             {"frame_rate", {decoder.rate_num(), decoder.rate_den()}},
             {"size", {out->width, out->height}},
             {"contents", settings.linear ? "linear light" : "the look"},
+            {"decoded", settings.linear ? (request.scene_from_log ? request.scene_name
+                                                                  : std::string("by the file's tags"))
+                                        : std::string("through the LUT")},
             {"primaries", "Rec.709"},
             {"encoding", exr ? "linear" : "sRGB"},
             {"shadows", settings.fill_shadows ? "filled" : "kept"},

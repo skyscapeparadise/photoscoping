@@ -970,6 +970,14 @@ int main(int argc, char** argv) {
         request.model_cpu = options->model_cpu;
         request.first = options->export_first;
         request.last = options->export_last;
+        request.scene = ps::gpu::scene_transform_for(decoder.signal(), lut ? &*lut : nullptr,
+                                                     &request.scene_from_log);
+        if (request.scene_from_log)
+            request.scene_name = std::string(ps::color::transfer_name(request.scene.transfer)) + ", " +
+                                 ps::color::gamut_name(request.scene.gamut);
+        std::printf("linear light: %s\n", request.scene_from_log
+                                               ? ("decoded from " + request.scene_name).c_str()
+                                               : "decoded by the file's tags");
         const int status = ps::exporting::run_light_maps(request, gpu, ingest, decoder, transform) ? 0 : 1;
         ingest.destroy();
         gpu.destroy();

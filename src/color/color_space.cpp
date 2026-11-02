@@ -117,6 +117,9 @@ const char* transfer_name(Transfer transfer) {
         case Transfer::kGamma26: return "gamma 2.6";
         case Transfer::kLinear:  return "linear";
         case Transfer::kSrgb:    return "sRGB";
+        case Transfer::kCanonLog:  return "Canon Log";
+        case Transfer::kCanonLog2: return "Canon Log 2";
+        case Transfer::kCanonLog3: return "Canon Log 3";
     }
     return "?";
 }
@@ -140,7 +143,25 @@ Mat3 to_working(Gamut gamut) { return convert(gamut, Gamut::kRec2020); }
 Mat3 working_to_rec709() { return convert(Gamut::kRec2020, Gamut::kRec709); }
 
 float decode_channel(Transfer transfer, float signal) {
+    // Video range, as Canon Log and Log 2 are defined on.
+    const float video = (signal * 1023.0f - 64.0f) / 876.0f;
     switch (transfer) {
+        case Transfer::kCanonLog3: {
+            const float x = signal;
+            if (x < 0.097465473f) return -(std::pow(10.0f, (0.12783901f - x) / 0.36726845f) - 1.0f) / 14.98325f;
+            if (x <= 0.15277891f) return (x - 0.12512219f) / 1.9754798f;
+            return (std::pow(10.0f, (x - 0.12240537f) / 0.36726845f) - 1.0f) / 14.98325f;
+        }
+        case Transfer::kCanonLog2: {
+            const float x = video;
+            if (x < 0.092864125f) return -(std::pow(10.0f, (0.035388128f - x) / 0.281864443f) - 1.0f) / 87.09937546f;
+            return (std::pow(10.0f, (x - 0.035388128f) / 0.281864443f) - 1.0f) / 87.09937546f;
+        }
+        case Transfer::kCanonLog: {
+            const float x = video;
+            if (x < 0.0730597f) return -(std::pow(10.0f, (0.0730597f - x) / 0.529136f) - 1.0f) / 10.1596f;
+            return (std::pow(10.0f, (x - 0.0730597f) / 0.529136f) - 1.0f) / 10.1596f;
+        }
         case Transfer::kBt1886:
             return std::pow(std::max(signal, 0.0f), 2.4f);
         case Transfer::kGamma26:

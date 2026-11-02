@@ -351,6 +351,8 @@ bool EditorApp::open_lut(const std::string& path) {
     if (!ingest_->set_lut(*lut)) return false;
     options_.lut = std::move(lut);
     options_.lut_path = path;
+    // What the preview decodes as scene light may have changed with it.
+    ++subject_version_;
     clip_.set_lut(&*options_.lut);
     root_.inspector()->set_row("input", stem_of(path));
     SDL_Log("LUT %s", path.c_str());
@@ -1194,7 +1196,11 @@ void EditorApp::request_light_preview() {
     request.crop.keys = {fixes::ShapeKey{shown_, corners}};
     request.linear = fixes_.light_export.linear;
     std::optional<LightPreview::Frame> frame;
-    if (!light_preview_.has_frame(shown_, subject_version_, fixes_.light_export.fill_shadows)) {
+    // Linear light and the look are different decodes of the frame: told
+    // apart by the top bit of the version.
+    const std::uint64_t frame_version =
+        subject_version_ | (fixes_.light_export.linear ? (std::uint64_t{1} << 63) : 0);
+    if (!light_preview_.has_frame(shown_, frame_version, fixes_.light_export.fill_shadows)) {
         // Uploaded before the tool wanted it kept: fetched again, keeping it.
         if (frames_.coverage().empty()) {
             frames_.set_keep_coverage(true);
@@ -1206,13 +1212,25 @@ void EditorApp::request_light_preview() {
             return;
         LightPreview::Frame in;
         in.frame = shown_;
-        in.version = subject_version_;
+        in.version = frame_version;
         in.fill_shadows = fixes_.light_export.fill_shadows;
         in.width = frames_.width();
         in.height = frames_.height();
         // Read back before this frame's work is recorded, as the subject's
-        // estimate does: the frame on screen is already on the GPU.
-        in.working = ingest_->read_working_raw();
+        // estimate does: the frame on screen is already on the GPU. Linear
+        // light is the frame decoded again from its planes as scene light --
+        // from the camera's log, when the LUT says what that is.
+        if (fixes_.light_export.linear) {
+            SDL_GPUCommandBuffer* again = SDL_AcquireGPUCommandBuffer(gpu_->device());
+            const bool ok = again && ingest_->process_again(
+                                         again, gpu::scene_transform_for(clip_.decoder().signal(),
+                                                                          options_.lut ? &*options_.lut : nullptr));
+            if (again) SDL_SubmitGPUCommandBuffer(again);
+            if (!ok) return;
+            in.working = ingest_->read_scene_raw();
+        } else {
+            in.working = ingest_->read_working_raw();
+        }
         in.coverage = frames_.coverage();
         if (patches_.shown() == shown_ && patches_.texture()) {
             in.patches = patches_.pixels();
@@ -1271,8 +1289,15 @@ void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, 
         root_.inspector()->light_controls()->set_preview(
             fixes_.find_light(root_.light_tool()->selected()) ? light_preview_.texture() : nullptr,
             light_preview_.aspect(),
-            fixes_.light_export.linear ? "preview \xC2\xB7 linear light at this frame's exposure"
-                                       : "preview \xC2\xB7 the graded look");
+            [&] {
+                if (!fixes_.light_export.linear) return std::string("preview \xC2\xB7 the graded look");
+                bool from_log = false;
+                const gpu::InputTransform scene = gpu::scene_transform_for(
+                    clip_.decoder().signal(), options_.lut ? &*options_.lut : nullptr, &from_log);
+                return std::string("preview \xC2\xB7 linear light") +
+                       (from_log ? std::string(" from ") + color::transfer_name(scene.transfer) : std::string()) +
+                       ", this frame's exposure";
+            }());
     }
     advance(cmd);
     root_.timeline()->set_frame(std::max<std::int64_t>(shown_, 0));

@@ -39,6 +39,21 @@ InputTransform transform_for(const media::SignalInfo& s, const color::CubeLut* l
     return t;
 }
 
+InputTransform scene_transform_for(const media::SignalInfo& s, const color::CubeLut* lut,
+                                   bool* from_log) {
+    InputTransform t = transform_from_tags(s);
+    const bool log = lut && lut->input;
+    if (log) {
+        t.gamut = lut->input->gamut;
+        t.transfer = lut->input->transfer;
+        // The LUT's own range for its input, where it says.
+        if (lut->full_range_in)
+            t.range = *lut->full_range_in ? color::SignalRange::kFull : color::SignalRange::kLimited;
+    }
+    if (from_log) *from_log = log;
+    return t;
+}
+
 namespace {
 
 // Linear light needs float, and half float is enough: 11 bits of mantissa
@@ -159,6 +174,10 @@ void IngestPass::release_frame_textures() {
     }
     if (working_) SDL_ReleaseGPUTexture(device_, working_);
     working_ = nullptr;
+    // Made again at the new size when next wanted.
+    if (scene_) SDL_ReleaseGPUTexture(device_, scene_);
+    scene_ = nullptr;
+    uploaded_ = false;
     if (upload_) SDL_ReleaseGPUTransferBuffer(device_, upload_);
     upload_ = nullptr;
     width_ = height_ = 0;
@@ -302,8 +321,25 @@ bool IngestPass::process(SDL_GPUCommandBuffer* cmd, const media::VideoDecoder& f
     }
     SDL_EndGPUCopyPass(copy);
 
+    bit_depth_ = l.bit_depth;
+    sample_scale_ = l.sample_scale;
+    uploaded_ = true;
+    return convert(cmd, transform, working_);
+}
+
+bool IngestPass::process_again(SDL_GPUCommandBuffer* cmd, const InputTransform& transform) {
+    if (!uploaded_) return false;
+    if (!scene_) {
+        scene_ = make_texture(device_, SDL_GPU_TEXTURETYPE_2D, kWorkingFormat, width_, height_, 1,
+                              SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        if (!scene_) return false;
+    }
+    return convert(cmd, transform, scene_);
+}
+
+bool IngestPass::convert(SDL_GPUCommandBuffer* cmd, const InputTransform& transform, SDL_GPUTexture* into) {
     IngestUniform u = {};
-    const color::Affine3x4 m = color::ycbcr_to_rgb(transform.matrix, transform.range, l.bit_depth);
+    const color::Affine3x4 m = color::ycbcr_to_rgb(transform.matrix, transform.range, bit_depth_);
     const color::Mat3 g = color::to_working(transform.gamut);
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 4; ++c) u.ycbcr[r][c] = m[r * 4 + c];
@@ -315,12 +351,12 @@ bool IngestPass::process(SDL_GPUCommandBuffer* cmd, const media::VideoDecoder& f
         u.lut_domain_max[c] = lut_max_[c];
     }
     u.lut_domain_min[3] = lut ? lut_size_ : 0.0f;
-    u.sample_scale = l.sample_scale;
-    u.interleaved = l.interleaved_chroma ? 1.0f : 0.0f;
+    u.sample_scale = sample_scale_;
+    u.interleaved = interleaved_ ? 1.0f : 0.0f;
     u.transfer = static_cast<float>(static_cast<int>(transform.transfer));
 
     SDL_GPUColorTargetInfo target = {};
-    target.texture = working_;
+    target.texture = into;
     target.load_op = SDL_GPU_LOADOP_DONT_CARE;
     target.store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &target, 1, nullptr);
@@ -338,9 +374,19 @@ bool IngestPass::process(SDL_GPUCommandBuffer* cmd, const media::VideoDecoder& f
     return true;
 }
 
-std::vector<std::uint16_t> IngestPass::read_working_raw() {
+std::vector<std::uint16_t> IngestPass::read_working_raw() { return read_raw(working_); }
+std::vector<std::uint16_t> IngestPass::read_scene_raw() { return read_raw(scene_); }
+
+std::vector<float> IngestPass::read_scene() {
+    const std::vector<std::uint16_t> halves = read_scene_raw();
+    std::vector<float> out(halves.size());
+    for (std::size_t i = 0; i < halves.size(); ++i) out[i] = half_to_float(halves[i]);
+    return out;
+}
+
+std::vector<std::uint16_t> IngestPass::read_raw(SDL_GPUTexture* texture) {
     std::vector<std::uint16_t> out;
-    if (!working_) return out;
+    if (!texture) return out;
     const Uint32 size = width_ * height_ * 8;
     SDL_GPUTransferBufferCreateInfo info = {};
     info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
@@ -351,7 +397,7 @@ std::vector<std::uint16_t> IngestPass::read_working_raw() {
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
     SDL_GPUTextureRegion src = {};
-    src.texture = working_;
+    src.texture = texture;
     src.w = width_;
     src.h = height_;
     src.d = 1;
