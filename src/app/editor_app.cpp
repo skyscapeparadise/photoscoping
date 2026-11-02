@@ -375,6 +375,8 @@ void EditorApp::install_menu() {
                 static_cast<EditorApp*>(self)->light_option(option, value);
             },
             [](void* self, int option) { return static_cast<EditorApp*>(self)->light_value(option); },
+            [](void* self) { static_cast<EditorApp*>(self)->matte_frame(); },
+            [](void* self) { return static_cast<EditorApp*>(self)->can_matte_frame(); },
         });
 #endif
 }
@@ -395,6 +397,29 @@ void EditorApp::show_open_dialog() {
             SDL_PushEvent(&event);
         },
         this, gpu_->window(), kFilters, 2, nullptr, /*allow_many=*/false);
+}
+
+bool EditorApp::can_matte_frame() const {
+    if (!clip_.is_open() || !job_.available() || job_.running() || shown_ < 0) return false;
+    // Nothing to do on a frame already matted -- and refined, with a plate.
+    const bool refined = !fixes_.plate.set() ||
+                         (shown_ < static_cast<std::int64_t>(frames_.refined().size()) &&
+                          frames_.refined()[static_cast<std::size_t>(shown_)]);
+    return !(frames_.matted(shown_) && refined);
+}
+
+void EditorApp::matte_frame() {
+    if (!can_matte_frame()) return;
+    const std::string range = std::to_string(shown_) + ":" + std::to_string(shown_);
+    if (job_.start(MatteJob::Kind::kMatte, clip_.path(), options_.lut_path, options_.render_dir,
+                   clip_name_, {}, {}, range)) {
+        job_started_ns_ = SDL_GetTicksNS();
+        done_at_start_ = frames_.done_count();
+        refined_at_start_ = frames_.refined_count();
+        matting_frame_ = shown_;
+        set_playing(false);
+    }
+    refresh_matte_ui();
 }
 
 bool EditorApp::can_export_lights() const {
@@ -689,7 +714,9 @@ void EditorApp::refresh_matte_ui() {
     frames_.set_keep_coverage(wants_coverage());
 
     std::string row = "none";
-    if (job_.running() && job_.kind() == MatteJob::Kind::kMatte && !complete) {
+    if (job_.running() && matting_frame_ >= 0) {
+        row = "matting frame " + std::to_string(matting_frame_);
+    } else if (job_.running() && job_.kind() == MatteJob::Kind::kMatte && !complete) {
         row = std::to_string(done) + " of " + std::to_string(total);
         const double elapsed = (SDL_GetTicksNS() - job_started_ns_) / 1e9;
         const std::int64_t made = done - done_at_start_;
@@ -790,7 +817,7 @@ void EditorApp::refresh_matte_ui() {
         inspector->set_action("refine " + std::to_string(total - refined) + " frames with the plate",
                               plate_image_ready());
     else if (done > 0 && !complete)
-        inspector->set_action("resume matting", true);
+        inspector->set_action("matte the rest", true);
     else if (source_ != MatteSource::kNone)
         inspector->set_action("matted", false);
     else
@@ -803,6 +830,7 @@ void EditorApp::toggle_job() {
         if (job_.kind() == MatteJob::Kind::kExport || job_.kind() == MatteJob::Kind::kLights)
             export_status_ = "stopped";
         job_.stop();
+        matting_frame_ = -1;
     } else if (clip_.is_open() && root_.tool() == editor::Tool::kRematte) {
         if (job_.start(MatteJob::Kind::kRematte, clip_.path(), options_.lut_path,
                        options_.render_dir, clip_name_)) {
@@ -856,6 +884,21 @@ void EditorApp::poll_job() {
         // Finished, the new videos are in place and newer than the frames.
         choose_matte_source();
         if (plating) ++subject_version_;
+        // A one-frame run: its frame is on show, in a view that shows the
+        // matte, so the feedback it was asked for is there to see.
+        if (matting_frame_ >= 0) {
+            frames_.rescan();
+            choose_matte_source();
+            if (frames_.matted(matting_frame_)) {
+                target_ = matting_frame_;
+                frames_.refresh();
+                if (view_ == editor::View::kFootage) {
+                    refresh_matte_ui();  // the views become available first
+                    root_.inspector()->views()->set_view(editor::View::kOverlay);
+                }
+            }
+            matting_frame_ = -1;
+        }
         // A plate asked for while this ran is made now -- once: a plate run
         // that failed is not retried until the plate changes again.
         if (!plating && plate_wanted_) start_plate_job();
@@ -986,6 +1029,9 @@ void EditorApp::handle(const SDL_Event& event) {
                     break;
                 case SDLK_TAB:
                     if (!event.key.repeat) root_.toggle_panel();
+                    break;
+                case SDLK_M:
+                    if (!event.key.repeat) matte_frame();
                     break;
                 case SDLK_1:
                 case SDLK_KP_1: root_.inspector()->views()->set_view(editor::View::kFootage); break;

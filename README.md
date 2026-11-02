@@ -160,6 +160,13 @@ VP9 libvpx's. A stopped export leaves only a `.partial` file.
 (`--range A:B` for part of the clip). `--plate-clip DIR` makes the plate
 headless.
 
+Clip > Matte This Frame (M) mattes just the frame on screen, in the
+background, to see how the matte comes out before committing to the whole
+clip -- and refines it with the clean plate, if one is set. Once it is done the
+view switches to show it, and the frame counts as matted: the pill then offers
+to matte the rest. A frame alone pays the model's warm-up, so it takes longer
+than a frame in a run: about 25 seconds at 4K.
+
 The viewer shows a matte four ways: the footage, the matte, the matted subject
 over a checkerboard, or the footage washed purple wherever the matte drops it.
 The pills under the inspector switch between them, as do the keys 1-4, and a

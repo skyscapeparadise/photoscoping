@@ -21,6 +21,9 @@ struct FileMenuActions {
     // is now.
     void (*light_option)(void* context, int option, int value) = nullptr;
     int (*light_value)(void* context, int option) = nullptr;
+    // Clip > Matte This Frame, and whether it can be done now.
+    void (*matte_frame)(void* context) = nullptr;
+    bool (*can_matte_frame)(void* context) = nullptr;
 };
 
 enum LightOption { kLightLinear = 0, kLightFillShadows = 1, kLightSize = 2 };
@@ -39,8 +42,10 @@ enum PlateState { kPlateClipOpen = 1, kPlateIsSet = 2, kPlateCorrects = 4 };
 //                           and EXR Sequences; Linear Light or Graded Look;
 //                           Fill the Performer's Shadow; Size >
 //
-// and a Clip menu, for the clean plate:
+// and a Clip menu:
 //
+//   Matte This Frame            M -- the frame on screen alone, to see how
+//                               the matte comes out before the whole clip
 //   Start Clean Plate Here      Command-[
 //   End Clean Plate Here        Command-]
 //   Clear Clean Plate

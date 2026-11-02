@@ -97,6 +97,9 @@ private:
     int light_value(int option) const;
     // The card's controls, bound to the light tool's selected crop.
     void refresh_light_controls();
+    // Clip > Matte This Frame: the frame on screen alone, in the background.
+    bool can_matte_frame() const;
+    void matte_frame();
     // Clip > the clean plate: marks its frames at the playhead, clears it,
     // or turns its override on and off (PlateAction).
     void plate_action(int action);
@@ -207,6 +210,8 @@ private:
     std::int64_t refined_at_start_ = 0;
     // The plate wants making, and waits for the run that is going to end.
     bool plate_wanted_ = false;
+    // The frame a one-frame run is matting, or -1.
+    std::int64_t matting_frame_ = -1;
     Uint64 last_poll_ns_ = 0;
     editor::View view_ = editor::View::kFootage;
 

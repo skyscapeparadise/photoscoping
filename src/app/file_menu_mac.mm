@@ -15,6 +15,7 @@
 - (void)exportAs:(id)sender;
 - (void)plateAction:(id)sender;
 - (void)lightOption:(id)sender;
+- (void)matteFrame:(id)sender;
 @end
 
 @implementation PSFileMenuTarget
@@ -47,6 +48,10 @@
     }
     actions_.light_option(actions_.context, option, value);
 }
+- (void)matteFrame:(id)sender {
+    (void)sender;
+    if (actions_.matte_frame) actions_.matte_frame(actions_.context);
+}
 - (void)plateAction:(id)sender {
     if (actions_.plate) actions_.plate(actions_.context, (int)[sender tag]);
 }
@@ -58,6 +63,8 @@
         if (light) return actions_.can_export_lights && actions_.can_export_lights(actions_.context);
         return actions_.can_export && actions_.can_export(actions_.context);
     }
+    if ([item action] == @selector(matteFrame:))
+        return actions_.can_matte_frame && actions_.can_matte_frame(actions_.context);
     if ([item action] == @selector(lightOption:)) {
         const long tag = [item tag];
         const int option = (int)(tag / 100000), value = (int)(tag % 100000);
@@ -165,6 +172,15 @@ bool install_file_menu(const FileMenuActions& actions) {
     [bar insertItem:holder atIndex:MIN(1, [bar numberOfItems])];
 
     NSMenu* clip = [[NSMenu alloc] initWithTitle:@"Clip"];
+    // M, with no modifier. The app's own keys take it too; whichever sees
+    // it first starts the run, and the other finds it already going.
+    NSMenuItem* matte = [[NSMenuItem alloc] initWithTitle:@"Matte This Frame"
+                                                   action:@selector(matteFrame:)
+                                            keyEquivalent:@"m"];
+    [matte setKeyEquivalentModifierMask:0];
+    [matte setTarget:g_target];
+    [clip addItem:matte];
+    [clip addItem:[NSMenuItem separatorItem]];
     struct Entry { NSString* title; int action; NSString* key; };
     const Entry entries[] = {
         {@"Start Clean Plate Here", kPlateStart, @"["},

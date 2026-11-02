@@ -41,9 +41,11 @@ public:
     // the run's own output goes to a log there.
     // For an export, `out` is where the clip's renders are, and `export_to`
     // and `format` (an ExportFormat's id) say what to write where.
+    // `range`, "A:B", limits a run to those frames -- one frame, matted for
+    // a look at it.
     bool start(Kind kind, const std::string& clip, const std::string& lut, const std::string& out,
                const std::string& name, const std::string& export_to = {},
-               const std::string& format = {});
+               const std::string& format = {}, const std::string& range = {});
     // How far an export has got, from the last progress line in its log.
     // False until it has written one.
     bool export_progress(std::int64_t* done, std::int64_t* total) const;

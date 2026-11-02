@@ -47,7 +47,7 @@ void MatteJob::locate() {
 
 bool MatteJob::start(Kind kind, const std::string& clip, const std::string& lut, const std::string& out,
                      const std::string& name, const std::string& export_to,
-                     const std::string& format) {
+                     const std::string& format, const std::string& range) {
     if (!available() || running()) return false;
     std::error_code ec;
     fs::create_directories(out, ec);
@@ -64,6 +64,7 @@ bool MatteJob::start(Kind kind, const std::string& clip, const std::string& lut,
         args.insert(args.end(), {rematte ? "--rematte-clip" : "--matte-clip", out});
     }
     args.insert(args.end(), {"--models", models_});
+    if (!range.empty()) args.insert(args.end(), {"--range", range});
     if (!lut.empty()) {
         args.push_back("--lut");
         args.push_back(lut);
