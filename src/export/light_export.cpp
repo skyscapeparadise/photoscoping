@@ -177,7 +177,6 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
                 settings.fill_shadows ? ", shadows filled" : "");
     std::fflush(stdout);
 
-    const int big_margin = std::max(48, w / 40);
     for (std::int64_t f = first; f <= last; ++f) {
         const Uint64 t = SDL_GetTicksNS();
         const auto frame = read_frame(f, f == first);
@@ -191,62 +190,17 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
             return false;
         }
 
-        // The backdrop as it would be without the performer: from the plate
-        // relit for this frame, or a smooth surface fitted to the backdrop
-        // around each crop. Filling shadows too, it is measured further from
-        // the performer, so it stands for the light before they fell.
-        const int margin = settings.fill_shadows ? big_margin : 8;
-        std::vector<std::uint8_t> not_wall(pixels);
-        {
-            std::vector<std::uint8_t> subject(pixels);
-            for (std::size_t i = 0; i < pixels; ++i) subject[i] = alpha[i] >= 0.002f;
-            not_wall = matting::dilate_cross(subject, w, h, margin);
-        }
-        // With a plate, the surface is fitted to the light -- the frame over
-        // the plate -- and the plate's own detail kept on top of it.
-        std::vector<float> ratio;
-        if (!plate.empty()) {
-            ratio.resize(pixels * 3);
-            for (std::size_t i = 0; i < pixels * 3; ++i)
-                ratio[i] = frame->linear[i] / std::max(plate.linear[i], 1e-3f);
-        }
+        const light::FrameLight fl = light::prepare_frame_light(
+            frame->linear, alpha, w, h, plate.empty() ? nullptr : &plate.linear, settings.fill_shadows);
 
         for (const auto& out : outputs) {
             const int ow = out->width, oh = out->height;
             const std::size_t n = static_cast<std::size_t>(ow) * oh;
-            const light::Homography hm = light::quad_homography(out->crop->at(f), ow, oh);
-            const std::vector<float> rgb = light::warp(frame->linear, 3, w, h, hm, ow, oh);
-            const std::vector<float> a = light::warp(alpha, 1, w, h, hm, ow, oh);
-            std::vector<float> backdrop;
-            // Filling shadows with a plate, the plate is the wall without
-            // them, and only the light's broad change is wanted from the frame.
-            const bool broad = settings.fill_shadows && !ratio.empty();
-            const light::LightSurface surface = light::fit_light_surface(
-                ratio.empty() ? frame->linear : ratio, not_wall, w, h, out->crop->at(f), broad);
-            if (!surface.terms) {
-                backdrop = rgb;
-            } else if (ratio.empty()) {
-                backdrop = light::surface_image(surface, hm, ow, oh);
-            } else {
-                backdrop = light::warp(plate.linear, 3, w, h, hm, ow, oh);
-                const std::vector<float> light_on = light::surface_image(surface, hm, ow, oh);
-                for (std::size_t i = 0; i < backdrop.size(); ++i) backdrop[i] *= light_on[i];
-            }
-            std::vector<float> shadow_w;
-            if (settings.fill_shadows)
-                shadow_w = light::shadow_map(rgb, backdrop, a, ow, oh, !ratio.empty() && surface.terms);
-            const std::vector<float> cover =
-                light::cover_weight(a, shadow_w.empty() ? nullptr : &shadow_w, ow, oh);
-            const std::vector<float> filled = light::fill_behind(rgb, cover, backdrop, ow, oh);
-
-            // Encoded for sRGB -- scaled, for linear light; clipped, for
-            // the look -- and adjusted there, as Photoshop adjusts.
-            std::vector<float> encoded(n * 3);
-            for (std::size_t i = 0; i < n * 3; ++i) {
-                const float v = settings.linear ? filled[i] * scale : std::clamp(filled[i], 0.0f, 1.0f);
-                encoded[i] = light::srgb_encode(v);
-            }
-            light::adjust_hue_saturation(encoded, ow, oh, *out->crop);
+            const std::vector<float> filled = light::render_crop(fl, out->crop->at(f), ow, oh);
+            // Encoded for sRGB -- scaled, for linear light; clipped, for the
+            // look -- and adjusted there, as Photoshop adjusts.
+            const std::vector<float> encoded =
+                light::encode_crop(filled, settings.linear, scale, *out->crop, ow, oh);
 
             char frame_name[32];
             std::snprintf(frame_name, sizeof frame_name, "_%06lld", static_cast<long long>(f));

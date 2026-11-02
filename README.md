@@ -120,8 +120,11 @@ corners onto the board -- an angled board is straightened on export -- or
 drag inside to move it. Like a garbage matte a crop holds its place, and
 keys on the frame it is changed on; K keys it, Backspace and Shift-Backspace
 delete. The card shows the selected crop's Hue, Saturation and Lightness, with
-Colorize, as Photoshop has them (drag, or double-click to reset), and the size
-it will come out at. File > Export Light Maps writes every crop at once into a
+Colorize, as Photoshop has them (drag, or double-click to reset), the size
+it will come out at, and a preview of it as it will export -- straightened,
+the performer filled in, the colour adjusted -- made on a thread of its own
+and following the crop, its colour and the frame as they change. Linear light
+is previewed at the frame's own exposure; the export's spans the clip. File > Export Light Maps writes every crop at once into a
 chosen folder -- "clip light 1.mp4" and so on, each with a JSON sidecar -- as
 HEVC, ProRes 422, 422 LT or 4444, H.264, VP9, or PNG or EXR sequences. Its
 settings: Linear Light (the default) or Graded Look; Fill the Performer's

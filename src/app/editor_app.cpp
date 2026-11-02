@@ -198,7 +198,7 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options op
     };
     root_.inspector()->views()->on_view_changed = [this](editor::View view) {
         view_ = view;
-        frames_.set_keep_coverage(estimating_subject());
+        frames_.set_keep_coverage(wants_coverage());
     };
     root_.inspector()->on_action = [this] { toggle_job(); };
     job_.locate();
@@ -238,6 +238,11 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options op
         event.type = frame_event;
         SDL_PushEvent(&event);
     });
+    light_preview_.create(gpu.device(), [frame_event] {
+        SDL_Event event = {};
+        event.type = frame_event;
+        SDL_PushEvent(&event);
+    });
 
     if (options_.lut) {
         ingest_->set_lut(*options_.lut);
@@ -263,6 +268,7 @@ void EditorApp::destroy() {
     frames_.destroy();
     patches_.destroy();
     subject_est_.destroy();
+    light_preview_.destroy();
     matte_.destroy();
     subject_.destroy();
     mask_.destroy();
@@ -680,7 +686,7 @@ void EditorApp::refresh_matte_ui() {
     inspector->views()->set_available(
         source_ != MatteSource::kNone,
         (source_ == MatteSource::kVideos && subject_.is_open()) || source_ == MatteSource::kFrames);
-    frames_.set_keep_coverage(estimating_subject());
+    frames_.set_keep_coverage(wants_coverage());
 
     std::string row = "none";
     if (job_.running() && job_.kind() == MatteJob::Kind::kMatte && !complete) {
@@ -1040,7 +1046,10 @@ void EditorApp::advance(SDL_GPUCommandBuffer* cmd) {
     FrameSource* needed[5];
     int count = 0;
     needed[count++] = &clip_;
-    if (view_ != editor::View::kFootage) {
+    // The light tool reads the matte whatever the view: its preview fills in
+    // behind the performer.
+    const bool light_tool = root_.tool() == editor::Tool::kLight;
+    if (view_ != editor::View::kFootage || light_tool) {
         if (source_ == MatteSource::kVideos) {
             needed[count++] = &matte_;
             if (view_ == editor::View::kSubject && subject_.is_open()) needed[count++] = &subject_;
@@ -1075,6 +1084,70 @@ void EditorApp::advance(SDL_GPUCommandBuffer* cmd) {
     // Ahead of time: the next frame decodes while this one is on screen.
     if (playing_)
         for (int i = 0; i < count; ++i) needed[i]->request(target_ + 1);
+}
+
+bool EditorApp::wants_coverage() const {
+    return estimating_subject() || (root_.tool() == editor::Tool::kLight && source_ == MatteSource::kFrames);
+}
+
+void EditorApp::request_light_preview() {
+    const fixes::LightCrop* crop = fixes_.find_light(root_.light_tool()->selected());
+    if (root_.tool() != editor::Tool::kLight || !crop || source_ != MatteSource::kFrames || playing_ ||
+        shown_ < 0) {
+        if (!crop) light_preview_.clear();
+        return;
+    }
+    if (clip_.shown() != shown_ || frames_.shown() != shown_) return;
+    if (patches_.wants(shown_) && patches_.shown() != shown_) return;
+
+    // Everything the preview shows, as one string: asked again only when it
+    // changes -- the frame, the matte, the crop's place or colour, the
+    // settings.
+    const std::vector<fixes::Point> corners = crop->at(shown_);
+    char key[512];
+    std::snprintf(key, sizeof key, "%lld %llu %d %d | %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f | %.1f %.1f %.1f %d",
+                  static_cast<long long>(shown_), static_cast<unsigned long long>(subject_version_),
+                  fixes_.light_export.linear ? 1 : 0, fixes_.light_export.fill_shadows ? 1 : 0,
+                  corners[0].x, corners[0].y, corners[1].x, corners[1].y, corners[2].x, corners[2].y,
+                  corners[3].x, corners[3].y, crop->hue, crop->saturation, crop->lightness,
+                  crop->colorize ? 1 : 0);
+    if (light_preview_asked_ == key) return;
+
+    LightPreview::Crop request;
+    request.crop = *crop;
+    request.crop.keys = {fixes::ShapeKey{shown_, corners}};
+    request.linear = fixes_.light_export.linear;
+    std::optional<LightPreview::Frame> frame;
+    if (!light_preview_.has_frame(shown_, subject_version_, fixes_.light_export.fill_shadows)) {
+        // Uploaded before the tool wanted it kept: fetched again, keeping it.
+        if (frames_.coverage().empty()) {
+            frames_.set_keep_coverage(true);
+            frames_.refresh();
+            return;
+        }
+        if (frames_.width() != static_cast<int>(ingest_->width()) ||
+            frames_.height() != static_cast<int>(ingest_->height()))
+            return;
+        LightPreview::Frame in;
+        in.frame = shown_;
+        in.version = subject_version_;
+        in.fill_shadows = fixes_.light_export.fill_shadows;
+        in.width = frames_.width();
+        in.height = frames_.height();
+        // Read back before this frame's work is recorded, as the subject's
+        // estimate does: the frame on screen is already on the GPU.
+        in.working = ingest_->read_working_raw();
+        in.coverage = frames_.coverage();
+        if (patches_.shown() == shown_ && patches_.texture()) {
+            in.patches = patches_.pixels();
+            in.patch_rect = patches_.rect();
+        }
+        in.fixes = fixes_;
+        if (plate_image_ready()) in.plate_path = plate_image_path();
+        frame = std::move(in);
+    }
+    light_preview_.request(std::move(frame), std::move(request));
+    light_preview_asked_ = key;
 }
 
 bool EditorApp::estimating_subject() const {
@@ -1117,6 +1190,14 @@ void EditorApp::request_subject() {
 
 void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, float dt) {
     request_subject();
+    request_light_preview();
+    if (light_preview_.take(cmd) || !fixes_.find_light(root_.light_tool()->selected())) {
+        root_.inspector()->light_controls()->set_preview(
+            fixes_.find_light(root_.light_tool()->selected()) ? light_preview_.texture() : nullptr,
+            light_preview_.aspect(),
+            fixes_.light_export.linear ? "preview \xC2\xB7 linear light at this frame's exposure"
+                                       : "preview \xC2\xB7 the graded look");
+    }
     advance(cmd);
     root_.timeline()->set_frame(std::max<std::int64_t>(shown_, 0));
     root_.timeline()->set_playing(playing_);
@@ -1312,7 +1393,7 @@ bool EditorApp::screenshot(const char* path) {
     // is of the frame asked for, not of whatever the workers had got to.
     if (clip_.is_open()) {
         clip_.wait(target_);
-        if (view_ != editor::View::kFootage) {
+        if (view_ != editor::View::kFootage || root_.tool() == editor::Tool::kLight) {
             if (source_ == MatteSource::kVideos) {
                 matte_.wait(target_);
                 if (view_ == editor::View::kSubject) subject_.wait(target_);

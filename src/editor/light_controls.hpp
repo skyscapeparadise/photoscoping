@@ -1,5 +1,7 @@
 #pragma once
 
+#include <SDL3/SDL.h>
+
 #include <functional>
 #include <string>
 
@@ -54,6 +56,9 @@ public:
     // The crop being adjusted, or null for none (the controls grey out);
     // and its exported size, for the line under them.
     void bind(const fixes::LightCrop* crop, const std::string& size_text);
+    // The crop as it will export, under the controls: a texture of `aspect`
+    // (width over height), or null while there is none to show.
+    void set_preview(SDL_GPUTexture* texture, float aspect, const std::string& caption);
 
     // Before an edit, for undo; while it changes; when it is done.
     std::function<void()> on_edit_begin;
@@ -73,6 +78,10 @@ private:
     ui::TextNode* colorize_label_ = nullptr;
     ui::TextNode* size_ = nullptr;
     ui::TextNode* hint_ = nullptr;
+    ui::RectNode* preview_frame_ = nullptr;
+    ui::IconNode* preview_ = nullptr;
+    ui::TextNode* caption_ = nullptr;
+    float preview_aspect_ = 1.0f;
     fixes::LightCrop crop_;
     std::string size_text_cache_;
     bool bound_ = false;

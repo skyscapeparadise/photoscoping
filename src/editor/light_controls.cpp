@@ -157,7 +157,35 @@ void LightControls::build(ui::FontCache& fonts) {
     hint_->set_text("drag on the backdrop to add a light");
     hint_->v_align = ui::VAlign::kCenter;
 
+    // The preview: the light map itself, framed, with what it is under it.
+    preview_frame_ = add<ui::RectNode>();
+    preview_frame_->border_width = 1.0f;
+    preview_frame_->border_color = gpu::Color::hex(0xFFFFFF, 0.35f);
+    preview_frame_->radius = 4.0f;
+    preview_ = add<ui::IconNode>();
+    preview_->colorize = false;
+    preview_->fill_mode = ui::IconNode::FillMode::kStretch;
+    caption_ = add<ui::TextNode>();
+    caption_->set_font_cache(&fonts);
+    caption_->pixel_size = 13.0f;
+    caption_->color = gpu::Color::hex(0xFFFFFF, 0.5f);
+    caption_->v_align = ui::VAlign::kCenter;
+    caption_->elide = ui::Elide::kRight;
+
     bind(nullptr, {});
+    set_preview(nullptr, 1.0f, {});
+}
+
+void LightControls::set_preview(SDL_GPUTexture* texture, float aspect, const std::string& caption) {
+    const bool show = bound_ && texture;
+    preview_->texture = texture;
+    preview_->source_aspect = aspect;
+    preview_->visible = show;
+    preview_frame_->visible = show;
+    caption_->visible = show && !caption.empty();
+    caption_->set_text(caption);
+    if (aspect > 0.0f) preview_aspect_ = aspect;
+    layout_self();
 }
 
 void LightControls::bind(const fixes::LightCrop* crop, const std::string& size_text) {
@@ -216,6 +244,27 @@ void LightControls::layout_self() {
     hint_->y = 0.0f;
     hint_->width = width;
     hint_->height = kRow;
+
+    // The preview fills what is left, as large as its shape allows.
+    const float top = y + 78.0f, caption_h = 20.0f;
+    const float room_h = std::max(0.0f, height - top - caption_h - 4.0f);
+    float pw = width, ph = pw / std::max(0.05f, preview_aspect_);
+    if (ph > room_h) {
+        ph = room_h;
+        pw = ph * preview_aspect_;
+    }
+    preview_->x = 0.0f;
+    preview_->y = top;
+    preview_->width = pw;
+    preview_->height = ph;
+    preview_frame_->x = -1.0f;
+    preview_frame_->y = top - 1.0f;
+    preview_frame_->width = pw + 2.0f;
+    preview_frame_->height = ph + 2.0f;
+    caption_->x = 0.0f;
+    caption_->y = top + ph + 4.0f;
+    caption_->width = width;
+    caption_->height = caption_h;
 }
 
 }  // namespace ps::editor

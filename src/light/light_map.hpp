@@ -82,6 +82,38 @@ std::vector<float> shadow_map(const std::vector<float>& light, const std::vector
                               const std::vector<float>& alpha, int width, int height,
                               bool reliable = false);
 
+// One frame, made ready for its light maps: what render_crop() reads.
+struct FrameLight {
+    const std::vector<float>* linear = nullptr;  // planar linear Rec.709
+    const std::vector<float>* alpha = nullptr;   // the matte as shown
+    int width = 0, height = 0;
+    // Nonzero where the backdrop is hidden or too near the performer to
+    // measure (backdrop_hidden()).
+    std::vector<std::uint8_t> not_wall;
+    // With a clean plate: the plate, and the frame's light on it (frame over
+    // plate). Empty without one.
+    const std::vector<float>* plate = nullptr;
+    std::vector<float> ratio;
+    bool fill_shadows = false;
+};
+// The frame made ready: the backdrop kept back from the performer (further,
+// when shadows are being filled, so it stands for the light before they fell)
+// and, with a plate, the light on it.
+FrameLight prepare_frame_light(const std::vector<float>& linear, const std::vector<float>& alpha,
+                               int width, int height, const std::vector<float>* plate,
+                               bool fill_shadows);
+
+// One crop of a frame: straightened to width x height, the performer -- and
+// their shadow, if filling -- replaced by the backdrop behind them. Planar
+// linear light, not yet scaled, encoded or adjusted.
+std::vector<float> render_crop(const FrameLight& frame, const std::vector<fixes::Point>& corners,
+                               int width, int height);
+
+// A rendered crop as it is written: linear light times `scale`, or the look
+// clipped at white; sRGB-encoded; and adjusted as the crop says. Planar.
+std::vector<float> encode_crop(const std::vector<float>& filled, bool linear, float scale,
+                               const fixes::LightCrop& crop, int width, int height);
+
 // Photoshop's Hue/Saturation on encoded RGB (0..1, planar), in place.
 void adjust_hue_saturation(std::vector<float>& planes, int width, int height,
                            const fixes::LightCrop& crop);

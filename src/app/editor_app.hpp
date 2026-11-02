@@ -13,6 +13,7 @@
 #include "app/matte_job.hpp"
 #include "app/rematte_patches.hpp"
 #include "app/subject_estimate.hpp"
+#include "app/light_preview.hpp"
 #include "color/cube_lut.hpp"
 #include "editor/editor_window.hpp"
 #include "editor/inspector.hpp"
@@ -156,6 +157,12 @@ private:
     // frame on screen, when it is still, if it has not been asked for.
     bool estimating_subject() const;
     void request_subject();
+    // Whether the matte's coverage is wanted on the CPU: for the subject's
+    // estimate, or the light tool's preview.
+    bool wants_coverage() const;
+    // The light tool's preview of the selected crop: asked for when anything
+    // it shows has changed, the frame read back only when that changed.
+    void request_light_preview();
 
     gpu::GpuContext* gpu_ = nullptr;
     gpu::IngestPass* ingest_ = nullptr;
@@ -175,6 +182,10 @@ private:
     // the patches -- so it is made again when they change, not on every
     // step of a drag.
     std::uint64_t subject_version_ = 0;
+    // The selected light-map crop as it will export, for the card.
+    LightPreview light_preview_;
+    // What the last preview was asked for from, to ask again only on change.
+    std::string light_preview_asked_;
     MatteSource source_ = MatteSource::kNone;
 
     // The hand-made fixes for the open clip, kept beside its renders.

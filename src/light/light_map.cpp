@@ -401,6 +401,69 @@ void adjust_hue_saturation(std::vector<float>& planes, int width, int height,
     }
 }
 
+FrameLight prepare_frame_light(const std::vector<float>& linear, const std::vector<float>& alpha,
+                               int width, int height, const std::vector<float>* plate,
+                               bool fill_shadows) {
+    FrameLight f;
+    f.linear = &linear;
+    f.alpha = &alpha;
+    f.width = width;
+    f.height = height;
+    f.fill_shadows = fill_shadows;
+    const std::size_t n = static_cast<std::size_t>(width) * height;
+    std::vector<std::uint8_t> subject(n);
+    for (std::size_t i = 0; i < n; ++i) subject[i] = alpha[i] >= 0.002f;
+    const int margin = fill_shadows ? std::max(48, width / 40) : 8;
+    f.not_wall = matting::dilate_cross(subject, width, height, margin);
+    if (plate && plate->size() == n * 3) {
+        f.plate = plate;
+        f.ratio.resize(n * 3);
+        for (std::size_t i = 0; i < n * 3; ++i) f.ratio[i] = linear[i] / std::max((*plate)[i], 1e-3f);
+    }
+    return f;
+}
+
+std::vector<float> render_crop(const FrameLight& f, const std::vector<fixes::Point>& corners, int ow, int oh) {
+    const int w = f.width, h = f.height;
+    const Homography hm = quad_homography(corners, ow, oh);
+    const std::vector<float> rgb = warp(*f.linear, 3, w, h, hm, ow, oh);
+    const std::vector<float> a = warp(*f.alpha, 1, w, h, hm, ow, oh);
+    // The backdrop as it would be without the performer: a smooth surface
+    // fitted to the backdrop around the crop -- with a plate, to the light
+    // on it, and the plate's own detail kept on top. Filling shadows with a
+    // plate, the plate is the wall without them, and only the light's broad
+    // change is wanted from the frame.
+    const bool with_plate = f.plate && !f.ratio.empty();
+    const bool broad = f.fill_shadows && with_plate;
+    const LightSurface surface =
+        fit_light_surface(with_plate ? f.ratio : *f.linear, f.not_wall, w, h, corners, broad);
+    std::vector<float> backdrop;
+    if (!surface.terms) {
+        backdrop = rgb;
+    } else if (!with_plate) {
+        backdrop = surface_image(surface, hm, ow, oh);
+    } else {
+        backdrop = warp(*f.plate, 3, w, h, hm, ow, oh);
+        const std::vector<float> light_on = surface_image(surface, hm, ow, oh);
+        for (std::size_t i = 0; i < backdrop.size(); ++i) backdrop[i] *= light_on[i];
+    }
+    std::vector<float> shadow;
+    if (f.fill_shadows) shadow = shadow_map(rgb, backdrop, a, ow, oh, with_plate && surface.terms);
+    const std::vector<float> cover = cover_weight(a, shadow.empty() ? nullptr : &shadow, ow, oh);
+    return fill_behind(rgb, cover, backdrop, ow, oh);
+}
+
+std::vector<float> encode_crop(const std::vector<float>& filled, bool linear, float scale,
+                               const fixes::LightCrop& crop, int width, int height) {
+    std::vector<float> encoded(filled.size());
+    for (std::size_t i = 0; i < filled.size(); ++i) {
+        const float v = linear ? filled[i] * scale : std::clamp(filled[i], 0.0f, 1.0f);
+        encoded[i] = srgb_encode(v);
+    }
+    adjust_hue_saturation(encoded, width, height, crop);
+    return encoded;
+}
+
 float srgb_encode(float l) {
     l = std::max(l, 0.0f);
     return l <= 0.0031308f ? l * 12.92f : 1.055f * std::pow(l, 1.0f / 2.4f) - 0.055f;
