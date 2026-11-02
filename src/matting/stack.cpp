@@ -25,6 +25,10 @@ std::string model_path(const std::string& dir, int w, int h) {
 
 }  // namespace
 
+float MattingStack::resolution_scale(int width, int height) {
+    return std::max(1.0f, static_cast<float>(std::max(width, height)) / 3840.0f);
+}
+
 std::vector<int> tile_starts(int length, int tile, int min_overlap) {
     if (length <= tile) return {0};
     const int n = 1 + static_cast<int>(std::ceil(static_cast<double>(length - tile) /
@@ -63,10 +67,12 @@ std::vector<float> MattingStack::tiled(const MattingFrame& frame, const std::vec
     // never run: whatever it said would be thrown away.
     std::vector<std::uint8_t> soft(pixels);
     for (std::size_t i = 0; i < pixels; ++i) soft[i] = coarse[i] > 0.02f && coarse[i] < 0.98f;
-    const std::vector<std::uint8_t> band = dilate_cross(soft, w, h, 24);
+    const float scale = resolution_scale(w, h);
+    const std::vector<std::uint8_t> band =
+        dilate_cross(soft, w, h, static_cast<int>(std::lround(24.0f * scale)));
     std::vector<float> band_f(pixels);
     for (std::size_t i = 0; i < pixels; ++i) band_f[i] = band[i];
-    const std::vector<float> blend = gaussian_blur(band_f, w, h, 8.0f);
+    const std::vector<float> blend = gaussian_blur(band_f, w, h, 8.0f * scale);
 
     // Each tile weighted by its distance in from its own edge, squared, so
     // where tiles overlap each one fades out as the next takes over.
@@ -133,22 +139,25 @@ std::vector<float> MattingStack::closer(const MattingFrame& frame, const std::ve
         std::copy_n(&base[static_cast<std::size_t>(y + row) * frame.width + x], w,
                     &under[static_cast<std::size_t>(row) * w]);
 
-    // The same widening and feather the tiled stage uses, in crop pixels.
+    // The same widening and feather the tiled stage uses, in crop pixels --
+    // which are the frame's, so scaled for the frame's size, not the crop's.
+    const float scale = resolution_scale(frame.width, frame.height);
     std::vector<std::uint8_t> soft(pixels);
     for (std::size_t i = 0; i < pixels; ++i) {
         const float a = std::clamp(look[i], 0.0f, 1.0f);
         soft[i] = (a > 0.02f && a < 0.98f) || (under[i] > 0.02f && under[i] < 0.98f);
     }
-    const std::vector<std::uint8_t> band = dilate_cross(soft, w, h, 24);
+    const std::vector<std::uint8_t> band =
+        dilate_cross(soft, w, h, static_cast<int>(std::lround(24.0f * scale)));
     std::vector<float> band_f(pixels);
     for (std::size_t i = 0; i < pixels; ++i) band_f[i] = band[i];
-    const std::vector<float> blend = gaussian_blur(band_f, w, h, 8.0f);
+    const std::vector<float> blend = gaussian_blur(band_f, w, h, 8.0f * scale);
     std::vector<float> fused(pixels);
     for (std::size_t i = 0; i < pixels; ++i) {
         const float b = std::clamp(blend[i], 0.0f, 1.0f);
         fused[i] = b * std::clamp(look[i], 0.0f, 1.0f) + (1.0f - b) * under[i];
     }
-    if (!wall) return MattingStack::band(crop, fused, error);
+    if (!wall) return MattingStack::band(crop, fused, error, nullptr, 0.0f, scale);
     // The plate's part under the crop.
     const std::size_t source = static_cast<std::size_t>(frame.width) * frame.height;
     std::vector<float> wall_crop(pixels * 3);
@@ -156,12 +165,12 @@ std::vector<float> MattingStack::closer(const MattingFrame& frame, const std::ve
         for (int row = 0; row < h; ++row)
             std::copy_n(&(*wall)[c * source + static_cast<std::size_t>(y + row) * frame.width + x], w,
                         &wall_crop[c * pixels + static_cast<std::size_t>(row) * w]);
-    return MattingStack::band(crop, fused, error, &wall_crop, tolerance);
+    return MattingStack::band(crop, fused, error, &wall_crop, tolerance, scale);
 }
 
 std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vector<float>& alpha,
                                       std::string* error, const std::vector<float>* plate_wall,
-                                      float tolerance) {
+                                      float tolerance, float scale) {
     const int w = frame.width, h = frame.height;
     const std::size_t pixels = static_cast<std::size_t>(w) * h;
 
@@ -169,7 +178,9 @@ std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vect
     // matte is soft, widened.
     std::vector<std::uint8_t> soft(pixels);
     for (std::size_t i = 0; i < pixels; ++i) soft[i] = alpha[i] > 0.03f && alpha[i] < 0.97f;
-    const std::vector<std::uint8_t> unknown = dilate_cross(soft, w, h, 10);
+    if (scale <= 0.0f) scale = resolution_scale(w, h);
+    const std::vector<std::uint8_t> unknown =
+        dilate_cross(soft, w, h, static_cast<int>(std::lround(10.0f * scale)));
     std::vector<double> trimap(pixels);
     for (std::size_t i = 0; i < pixels; ++i)
         trimap[i] = unknown[i] ? 0.5 : (alpha[i] >= 0.5f ? 1.0 : 0.0);

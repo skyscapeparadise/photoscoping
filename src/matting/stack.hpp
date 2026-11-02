@@ -38,9 +38,20 @@ public:
     // a pixel in it the matte calls mostly wall that matches the plate within
     // `tolerance` is solved as wall, and the wall's true colour says how far
     // the solve can be trusted.
+    //
+    // `scale` widens its pixel distances (resolution_scale()); 0 takes it
+    // from the frame's own size, which is wrong for a crop -- the closer look
+    // passes the whole frame's.
     static std::vector<float> band(const MattingFrame& frame, const std::vector<float>& tiled,
                                    std::string* error, const std::vector<float>* wall = nullptr,
-                                   float tolerance = 0.0f);
+                                   float tolerance = 0.0f, float scale = 0.0f);
+
+    // How much the stack's distances in pixels -- how far the edge band
+    // reaches, how soft its own edge is -- are widened for a frame this size.
+    // They were set on 4K, where the coarse model sees the frame at half its
+    // size; at 8K it sees a quarter, and its edges are twice as soft in the
+    // frame's pixels. 1 at 4K and below, which are left exactly as they were.
+    static float resolution_scale(int width, int height);
     static std::vector<float> subject(const MattingFrame& frame, const std::vector<float>& alpha);
 
     // A local re-matte: the region from (x, y), w x h, looked at again on its

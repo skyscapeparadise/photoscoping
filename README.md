@@ -174,9 +174,14 @@ the `<clip>_comp.mp4` it renders instead.
 
 The stack's full-resolution tiles are only run where the subject's edge is:
 a tile of open wall or solid subject would be thrown away, so it is skipped,
-which leaves the matte the same to the bit. At 8K that holds a frame to about
-26 seconds on an M1 Max (10.5 GB at most); the matting run's log gives each
-frame's time by stage.
+which leaves the matte the same to the bit. Its distances in pixels -- how far
+the edge band reaches, how soft its own edge is -- were set on 4K and are
+widened in proportion above it, since the whole-frame model sees an 8K frame
+at a quarter of its size and its edges come out twice as soft in the frame's
+pixels; at 4K and below nothing changes. Up to 4K a frame is meant to take no
+more than about 30 seconds; at 8K quality comes first, and a frame takes
+about 32 seconds on an M1 Max (10.5 GB at most). The matting run's log gives
+each frame's time by stage.
 
 The matting stack runs through ONNX Runtime -- on the GPU through Core ML, on
 the Mac -- with two models `tools/export_matting_model.py` writes into
