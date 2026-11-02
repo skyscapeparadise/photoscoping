@@ -211,6 +211,23 @@ std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vect
     // Where a neighbour was not solved, the matte as it was makes up the rest.
     constexpr int kCell = 512;
     const int pad = static_cast<int>(std::lround(48.0f * scale));
+    // The colours the solve reads. Above 4K a pixel carries more of the
+    // sensor's noise, and the solve -- which fits alpha to local colour --
+    // reads that noise as detail and turns a smooth blur to grain; so there
+    // it reads a lightly softened copy, a pixel's worth at 8K, which is still
+    // finer than 4K. The matte it makes is full resolution all the same.
+    std::vector<float> softened;
+    const float* guide[3] = {frame.plane(0), frame.plane(1), frame.plane(2)};
+    if (scale > 1.0f) {
+        const float sigma = 0.5f * (scale - 1.0f) + 0.5f;
+        softened.resize(pixels * 3);
+        for (int c = 0; c < 3; ++c) {
+            const std::vector<float> plane(frame.plane(c), frame.plane(c) + pixels);
+            const std::vector<float> soft_plane = gaussian_blur(plane, w, h, sigma);
+            std::copy(soft_plane.begin(), soft_plane.end(), softened.begin() + c * pixels);
+            guide[c] = &softened[c * pixels];
+        }
+    }
     const float ramp = static_cast<float>(2 * pad);
     std::vector<float> acc(pixels, 0.0f), coverage(pixels, 0.0f);
     for (int y0 = 0; y0 < h; y0 += kCell) {
@@ -237,7 +254,7 @@ std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vect
                     region_trimap[d] = trimap[s];
                     has_fg = has_fg || trimap[s] == 1.0;
                     has_bg = has_bg || trimap[s] == 0.0;
-                    for (int c = 0; c < 3; ++c) region_rgb[d * 3 + c] = frame.plane(c)[s];
+                    for (int c = 0; c < 3; ++c) region_rgb[d * 3 + c] = guide[c][s];
                 }
             if (!has_fg || !has_bg) continue;
             const std::vector<double> a = estimate_alpha_cf(region_rgb, region_trimap, rw, rh, error);
