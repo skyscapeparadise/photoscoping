@@ -95,7 +95,12 @@ bool VideoDecoder::open(const std::string& path, bool hardware) {
 
     width_ = codec_->width;
     height_ = codec_->height;
-    const AVRational rate = stream->avg_frame_rate.num ? stream->avg_frame_rate : stream->r_frame_rate;
+    // FFmpeg's own judgement of the rate: the average, unless it disagrees
+    // with the stream's cadence -- as it does in a file whose pre-roll frames
+    // before zero (an edit list) skew the average: 23.136 for a 23.976 clip.
+    // Frame numbers are worked out from the rate, so a wrong one seeks to the
+    // wrong frame.
+    const AVRational rate = av_guess_frame_rate(format_, stream, nullptr);
     frame_rate_ = rate.num ? av_q2d(rate) : 0.0;
     rate_num_ = rate.num;
     rate_den_ = rate.num ? rate.den : 1;
