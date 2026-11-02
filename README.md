@@ -172,6 +172,12 @@ solid it shows the footage at full size. A clip matted by
 `tools/matte_clip.py` (the Python stack, still there for experiments) shows
 the `<clip>_comp.mp4` it renders instead.
 
+The stack's full-resolution tiles are only run where the subject's edge is:
+a tile of open wall or solid subject would be thrown away, so it is skipped,
+which leaves the matte the same to the bit. At 8K that holds a frame to about
+26 seconds on an M1 Max (10.5 GB at most); the matting run's log gives each
+frame's time by stage.
+
 The matting stack runs through ONNX Runtime -- on the GPU through Core ML, on
 the Mac -- with two models `tools/export_matting_model.py` writes into
 `models/`. The first run on a machine compiles them for Core ML, which takes a

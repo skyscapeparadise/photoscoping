@@ -503,6 +503,16 @@ bool run_matte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestP
         if (!needs(i, &base_needed, &plate_needed)) continue;
         const Uint64 t = SDL_GetTicksNS();
 
+        // Each part timed, for the log: where a slow frame went.
+        std::string parts;
+        Uint64 mark = t;
+        auto lap = [&](const char* what) {
+            const Uint64 now = SDL_GetTicksNS();
+            char text[48];
+            std::snprintf(text, sizeof text, "%s %.1f  ", what, (now - mark) / 1e9);
+            parts += text;
+            mark = now;
+        };
         SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
         const bool ingested = ingest.process(cmd, decoder, transform);
         SDL_SubmitGPUCommandBuffer(cmd);
@@ -510,17 +520,22 @@ bool run_matte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestP
         const ps::matting::MattingFrame frame = ps::matting::prepare_frame(
             ingest.read_working(), static_cast<int>(ingest.width()),
             static_cast<int>(ingest.height()));
+        lap("read");
 
         std::vector<float> alpha;
         if (base_needed) {
             alpha = stack.coarse(frame, &error);
+            lap("coarse");
             if (!alpha.empty()) alpha = stack.tiled(frame, alpha, &error);
+            lap("tiled");
             if (!alpha.empty()) alpha = ps::matting::MattingStack::band(frame, alpha, &error);
+            lap("band");
             if (alpha.empty()) {
                 std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(i), error.c_str());
                 return false;
             }
             if (!write(frame_png(out, i), alpha, frame.width, frame.height)) return false;
+            lap("write");
         } else {
             alpha = ps::exporting::read_matte(o.matte_clip, stem, i, frame.width, frame.height);
             if (alpha.empty()) {
@@ -536,14 +551,16 @@ bool run_matte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestP
                 return false;
             }
             if (!write(frame_png(plate_out, i), refined, frame.width, frame.height)) return false;
+            lap("plate");
         }
 
         ++made;
         ++done;
         const double per = (SDL_GetTicksNS() - started) / 1e9 / static_cast<double>(made);
-        std::printf("  %lld/%lld  frame %lld  %.2f s  eta %.1f min\n", static_cast<long long>(done),
+        std::printf("  %lld/%lld  frame %lld  %.2f s  eta %.1f min  (%s)\n", static_cast<long long>(done),
                     static_cast<long long>(count), static_cast<long long>(i),
-                    (SDL_GetTicksNS() - t) / 1e9, per * static_cast<double>(count - done) / 60.0);
+                    (SDL_GetTicksNS() - t) / 1e9, per * static_cast<double>(count - done) / 60.0,
+                    parts.c_str());
         std::fflush(stdout);
     }
     return done >= count;

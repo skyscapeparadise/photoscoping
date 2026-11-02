@@ -55,6 +55,19 @@ std::vector<float> MattingStack::tiled(const MattingFrame& frame, const std::vec
     const int tw = tile_.width(), th = tile_.height();
     const std::size_t pixels = static_cast<std::size_t>(w) * h;
 
+    // A tile sees part of the subject without the whole, so it is trusted for
+    // edge detail and not for what the subject is: only in the coarse
+    // matte's soft band, widened, with the band itself feathered so the
+    // change from one to the other does not show. Worked out first, so a
+    // tile with none of the band in it -- open wall, solid subject -- is
+    // never run: whatever it said would be thrown away.
+    std::vector<std::uint8_t> soft(pixels);
+    for (std::size_t i = 0; i < pixels; ++i) soft[i] = coarse[i] > 0.02f && coarse[i] < 0.98f;
+    const std::vector<std::uint8_t> band = dilate_cross(soft, w, h, 24);
+    std::vector<float> band_f(pixels);
+    for (std::size_t i = 0; i < pixels; ++i) band_f[i] = band[i];
+    const std::vector<float> blend = gaussian_blur(band_f, w, h, 8.0f);
+
     // Each tile weighted by its distance in from its own edge, squared, so
     // where tiles overlap each one fades out as the next takes over.
     std::vector<float> feather(static_cast<std::size_t>(tw) * th);
@@ -67,11 +80,21 @@ std::vector<float> MattingStack::tiled(const MattingFrame& frame, const std::vec
     std::vector<float> acc(pixels, 0.0f), weight(pixels, 0.0f);
     for (int y0 : tile_starts(h, th)) {
         for (int x0 : tile_starts(w, tw)) {
-            const std::vector<float> alpha = tile_.run(tile_input(frame, x0, y0, tw, th), error);
-            if (alpha.empty()) return {};
             // The part of the tile inside the frame; what padding added is
             // dropped.
             const int ch = std::min(th, h - y0), cw = std::min(tw, w - x0);
+            bool needed = false;
+            for (int y = 0; y < ch && !needed; ++y) {
+                const float* row = &blend[static_cast<std::size_t>(y0 + y) * w + x0];
+                for (int x = 0; x < cw; ++x)
+                    if (row[x] > 0.0f) {
+                        needed = true;
+                        break;
+                    }
+            }
+            if (!needed) continue;
+            const std::vector<float> alpha = tile_.run(tile_input(frame, x0, y0, tw, th), error);
+            if (alpha.empty()) return {};
             for (int y = 0; y < ch; ++y)
                 for (int x = 0; x < cw; ++x) {
                     const std::size_t t = static_cast<std::size_t>(y) * tw + x;
@@ -82,21 +105,14 @@ std::vector<float> MattingStack::tiled(const MattingFrame& frame, const std::vec
         }
     }
 
-    // A tile sees part of the subject without the whole, so it is trusted for
-    // edge detail and not for what the subject is: only in the coarse
-    // matte's soft band, widened, with the band itself feathered so the
-    // change from one to the other does not show.
-    std::vector<std::uint8_t> soft(pixels);
-    for (std::size_t i = 0; i < pixels; ++i) soft[i] = coarse[i] > 0.02f && coarse[i] < 0.98f;
-    const std::vector<std::uint8_t> band = dilate_cross(soft, w, h, 24);
-    std::vector<float> band_f(pixels);
-    for (std::size_t i = 0; i < pixels; ++i) band_f[i] = band[i];
-    const std::vector<float> blend = gaussian_blur(band_f, w, h, 8.0f);
-
     std::vector<float> out(pixels);
     for (std::size_t i = 0; i < pixels; ++i) {
-        const float tiles = acc[i] / std::max(weight[i], 1e-6f);
         const float b = std::clamp(blend[i], 0.0f, 1.0f);
+        if (b <= 0.0f) {
+            out[i] = coarse[i];
+            continue;
+        }
+        const float tiles = acc[i] / std::max(weight[i], 1e-6f);
         out[i] = b * tiles + (1.0f - b) * coarse[i];
     }
     return out;
