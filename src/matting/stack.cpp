@@ -202,8 +202,17 @@ std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vect
     // Solved in padded cells, so the full-resolution problem stays small.
     // A cell with nothing unknown, or without both subject and wall to solve
     // between, keeps the matte as it is.
-    constexpr int kCell = 512, kPad = 48;
-    std::vector<float> solved = alpha;
+    //
+    // Each cell's answer is kept over its padding too, fading out linearly
+    // across it while the next cell's fades in: two neighbours' weights add
+    // to one, so a cell's edge is never a hard cut. Solved independently,
+    // cells disagree across a wide soft region -- a motion-blurred hand at 8K
+    // spans several -- and cut at their edges, that showed as straight steps.
+    // Where a neighbour was not solved, the matte as it was makes up the rest.
+    constexpr int kCell = 512;
+    const int pad = static_cast<int>(std::lround(48.0f * scale));
+    const float ramp = static_cast<float>(2 * pad);
+    std::vector<float> acc(pixels, 0.0f), coverage(pixels, 0.0f);
     for (int y0 = 0; y0 < h; y0 += kCell) {
         for (int x0 = 0; x0 < w; x0 += kCell) {
             const int ch = std::min(kCell, h - y0), cw = std::min(kCell, w - x0);
@@ -215,8 +224,8 @@ std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vect
                         break;
                     }
             if (!any_unknown) continue;
-            const int ya = std::max(y0 - kPad, 0), yb = std::min(y0 + kCell + kPad, h);
-            const int xa = std::max(x0 - kPad, 0), xb = std::min(x0 + kCell + kPad, w);
+            const int ya = std::max(y0 - pad, 0), yb = std::min(y0 + kCell + pad, h);
+            const int xa = std::max(x0 - pad, 0), xb = std::min(x0 + kCell + pad, w);
             const int rw = xb - xa, rh = yb - ya;
             std::vector<double> region_trimap(static_cast<std::size_t>(rw) * rh);
             std::vector<double> region_rgb(region_trimap.size() * 3);
@@ -233,11 +242,30 @@ std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vect
             if (!has_fg || !has_bg) continue;
             const std::vector<double> a = estimate_alpha_cf(region_rgb, region_trimap, rw, rh, error);
             if (a.empty()) return {};
-            for (int y = 0; y < ch; ++y)
-                for (int x = 0; x < cw; ++x)
-                    solved[static_cast<std::size_t>(y0 + y) * w + (x0 + x)] = static_cast<float>(
-                        a[static_cast<std::size_t>(y0 - ya + y) * rw + (x0 - xa + x)]);
+            // The weight across, and down: a ramp at each side that meets
+            // another cell, none at the frame's edge.
+            auto weight_at = [&](int p, int lo, int hi, int limit) {
+                float t = 1.0f;
+                if (lo > 0) t = std::min(t, (static_cast<float>(p - lo) + 0.5f) / ramp);
+                if (hi < limit) t = std::min(t, (static_cast<float>(hi - p) - 0.5f) / ramp);
+                return std::clamp(t, 0.0f, 1.0f);
+            };
+            for (int y = 0; y < rh; ++y) {
+                const float wy = weight_at(ya + y, ya, yb, h);
+                for (int x = 0; x < rw; ++x) {
+                    const float wt = wy * weight_at(xa + x, xa, xb, w);
+                    if (wt <= 0.0f) continue;
+                    const std::size_t s = static_cast<std::size_t>(ya + y) * w + (xa + x);
+                    acc[s] += wt * static_cast<float>(a[static_cast<std::size_t>(y) * rw + x]);
+                    coverage[s] += wt;
+                }
+            }
         }
+    }
+    std::vector<float> solved(pixels);
+    for (std::size_t i = 0; i < pixels; ++i) {
+        const float c = coverage[i];
+        solved[i] = c >= 1.0f ? acc[i] / c : acc[i] + (1.0f - c) * alpha[i];
     }
 
     // How far to trust the solve: by how different the subject's colour is
