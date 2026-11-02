@@ -46,8 +46,10 @@ PlateImage halve_plate(const PlateImage& plate);
 // in behind the subject. Soft shadows and the strobe's level follow; hard
 // contact shadows do not, and stay for the band to decide. Planar linear
 // Rec.709, the frame's size. Empty if the plate is not the frame's size.
+// `margin` is how far back from the subject, in pixels, the wall is measured:
+// wider leaves the subject's shadow out of what is measured.
 std::vector<float> relight_plate(const PlateImage& plate, const MattingFrame& frame,
-                                 const std::vector<float>& alpha);
+                                 const std::vector<float>& alpha, int margin = 6);
 
 // How far the frame's visible wall strays from the relit plate by noise
 // alone: three times the median colour distance over it, held to at least

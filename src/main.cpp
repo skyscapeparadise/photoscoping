@@ -12,6 +12,7 @@
 #include "app/editor_app.hpp"
 #include "color/cube_lut.hpp"
 #include "export/clip_export.hpp"
+#include "export/light_export.hpp"
 #include "media/export_format.hpp"
 #include "fixes/fixes.hpp"
 #include "fixes/rematte.hpp"
@@ -38,6 +39,8 @@ struct Options {
     std::string matte_clip;
     std::string rematte_clip;
     std::string plate_clip;
+    std::string light_maps;
+    ps::media::ExportFormat light_format = ps::media::ExportFormat::kLightHevc;
     std::string export_path_out;
     ps::media::ExportFormat export_format = ps::media::ExportFormat::kProRes4444;
     std::int64_t export_first = 0;
@@ -88,6 +91,11 @@ void usage() {
         "                 only frames A to B, inclusive\n"
         "  --plate-clip DIR\n"
         "                 make the clean plate the clip's fixes in DIR name\n"
+        "  --light-maps DIR\n"
+        "                 export the clip's light maps -- every crop in its fixes -- into\n"
+        "                 DIR; reads its renders from --mattes DIR\n"
+        "  --light-format light-hevc|light-prores422|light-prores422lt|light-prores4444|\n"
+        "                 light-h264|light-vp9|light-png|light-exr  (default light-hevc)\n"
         "  --range A:B    with --matte-clip or --export-clip, only frames A to B\n"
         "  --models DIR   where tools/export_matting_model.py wrote the models\n"
         "                 (default: models)\n"
@@ -145,6 +153,15 @@ std::optional<Options> parse_args(int argc, char** argv) {
         } else if (a == "--export-format") {
             const char* v = value();
             if (!v || !ps::media::parse_export_format(v, &o.export_format)) return std::nullopt;
+        } else if (a == "--light-maps") {
+            const char* v = value();
+            if (!v) return std::nullopt;
+            o.light_maps = v;
+        } else if (a == "--light-format") {
+            const char* v = value();
+            if (!v || !ps::media::parse_export_format(v, &o.light_format) ||
+                ps::media::export_format_info(o.light_format).kind != ps::media::ExportKind::kLight)
+                return std::nullopt;
         } else if (a == "--plate-clip") {
             const char* v = value();
             if (!v) return std::nullopt;
@@ -199,7 +216,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
     }
     if (!o.export_path.empty()) o.probe = true;
     if ((o.probe || o.bench || o.pipe || !o.matte.empty() || !o.matte_clip.empty() ||
-         !o.rematte_clip.empty() || !o.export_path_out.empty() || !o.plate_clip.empty()) &&
+         !o.rematte_clip.empty() || !o.export_path_out.empty() || !o.plate_clip.empty() ||
+         !o.light_maps.empty()) &&
         o.clip.empty())
         return std::nullopt;
     return o;
@@ -723,7 +741,8 @@ int main(int argc, char** argv) {
     const bool headless =
         options->probe || options->bench || options->pipe || !options->matte.empty() ||
         !options->matte_clip.empty() || !options->rematte_clip.empty() ||
-        !options->export_path_out.empty() || !options->plate_clip.empty();
+        !options->export_path_out.empty() || !options->plate_clip.empty() ||
+        !options->light_maps.empty();
     ps::media::VideoDecoder decoder;
     if (headless) {
         if (!decoder.open(options->clip, !options->software)) return 1;
@@ -766,6 +785,23 @@ int main(int argc, char** argv) {
 
     if (!options->matte_clip.empty()) {
         const int status = run_matte_clip(*options, gpu, ingest, decoder, transform) ? 0 : 1;
+        ingest.destroy();
+        gpu.destroy();
+        SDL_Quit();
+        return status;
+    }
+
+    if (!options->light_maps.empty()) {
+        ps::exporting::LightRequest request;
+        request.clip = options->clip;
+        request.render_dir = options->mattes;
+        request.out_dir = options->light_maps;
+        request.format = options->light_format;
+        request.models = options->models;
+        request.model_cpu = options->model_cpu;
+        request.first = options->export_first;
+        request.last = options->export_last;
+        const int status = ps::exporting::run_light_maps(request, gpu, ingest, decoder, transform) ? 0 : 1;
         ingest.destroy();
         gpu.destroy();
         SDL_Quit();

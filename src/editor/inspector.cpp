@@ -61,6 +61,9 @@ void Inspector::build(ui::FontCache& fonts, const gpu::IconAtlas& atlas) {
     caption_->color = theme::kWhite;
 
     rows_ = card_->add<ui::Node>();
+    light_controls_ = card_->add<LightControls>();
+    light_controls_->build(fonts);
+    light_controls_->visible = false;
 
     views_ = add<ViewSwitch>();
     views_->build(fonts);
@@ -92,6 +95,11 @@ void Inspector::set_clip(const ClipInfo& info) {
 }
 
 void Inspector::set_heading(const std::string& text) { heading_->set_text(text); }
+
+void Inspector::show_light_controls(bool show) {
+    light_controls_->visible = show;
+    rows_->visible = !show;
+}
 
 void Inspector::set_row(const std::string& label, const std::string& value) {
     for (std::size_t i = 0; i < info_.rows.size(); ++i) {
@@ -193,6 +201,10 @@ void Inspector::layout_self() {
     rows_->y = caption_->y + caption_->height + pad * 0.8f;
     rows_->width = text_w;
     rows_->height = std::max(0.0f, card_->height - rows_->y - pad * 0.5f);
+    light_controls_->x = rows_->x;
+    light_controls_->y = rows_->y;
+    light_controls_->width = rows_->width;
+    light_controls_->height = rows_->height;
 
     // A label column wide enough for the longest label in use, measured
     // roughly rather than shaped: these are short lowercase words.

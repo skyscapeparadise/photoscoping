@@ -18,6 +18,10 @@ bool write_png16(const std::string& path, const std::vector<float>& values, int 
 bool write_png16_rgba(const std::string& path, const std::vector<std::uint16_t>& rgba, int width,
                       int height);
 
+// 16-bit RGB, interleaved: for exported light maps, which have no alpha.
+bool write_png16_rgb(const std::string& path, const std::vector<std::uint16_t>& rgb, int width,
+                     int height);
+
 // 0..1 to a 16-bit sample, rounded.
 std::uint16_t to_sample(float v);
 

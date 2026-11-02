@@ -15,6 +15,7 @@
 #include "fixes/mask.hpp"
 #include "media/export_format.hpp"
 #include "matting/plate.hpp"
+#include "light/light_map.hpp"
 
 namespace ps::app {
 
@@ -173,9 +174,28 @@ bool EditorApp::create(gpu::GpuContext& gpu, gpu::IngestPass& ingest, Options op
     rematte->is_made = [this](std::int64_t frame, const fixes::PixelRect& box) {
         return patches_.made(frame, box);
     };
+    editor::LightTool* light = root_.light_tool();
+    light->on_edit_begin = [this] { history_.record(fixes_); };
+    light->on_live_change = [this] { fixes_changed(/*save=*/false); };
+    light->on_changed = [this] { fixes_changed(/*save=*/true); };
+    light->on_selection_changed = [this] { refresh_light_controls(); };
+    editor::LightControls* controls = root_.inspector()->light_controls();
+    controls->on_edit_begin = [this] { history_.record(fixes_); };
+    controls->on_adjust = [this](const fixes::LightCrop& adjusted, bool done) {
+        fixes::LightCrop* crop = fixes_.find_light(root_.light_tool()->selected());
+        if (!crop) return;
+        crop->hue = adjusted.hue;
+        crop->saturation = adjusted.saturation;
+        crop->lightness = adjusted.lightness;
+        crop->colorize = adjusted.colorize;
+        fixes_changed(done);
+    };
     // The pill under the inspector is the matting run's, or the re-matte's
     // with that tool in hand.
-    root_.on_tool_changed = [this](editor::Tool) { refresh_matte_ui(); };
+    root_.on_tool_changed = [this](editor::Tool) {
+        refresh_light_controls();
+        refresh_matte_ui();
+    };
     root_.inspector()->views()->on_view_changed = [this](editor::View view) {
         view_ = view;
         frames_.set_keep_coverage(estimating_subject());
@@ -344,6 +364,11 @@ void EditorApp::install_menu() {
             [](void* self) { return static_cast<EditorApp*>(self)->can_export(); },
             [](void* self, int action) { static_cast<EditorApp*>(self)->plate_action(action); },
             [](void* self) { return static_cast<EditorApp*>(self)->plate_state(); },
+            [](void* self) { return static_cast<EditorApp*>(self)->can_export_lights(); },
+            [](void* self, int option, int value) {
+                static_cast<EditorApp*>(self)->light_option(option, value);
+            },
+            [](void* self, int option) { return static_cast<EditorApp*>(self)->light_value(option); },
         });
 #endif
 }
@@ -364,6 +389,50 @@ void EditorApp::show_open_dialog() {
             SDL_PushEvent(&event);
         },
         this, gpu_->window(), kFilters, 2, nullptr, /*allow_many=*/false);
+}
+
+bool EditorApp::can_export_lights() const {
+    // The matte says where the performer hides the backdrop, so the clip is
+    // matted first, as for any export.
+    return can_export() && !fixes_.lights.empty();
+}
+
+void EditorApp::light_option(int option, int value) {
+    fixes::LightExport e = fixes_.light_export;
+    switch (option) {
+        case kLightLinear: e.linear = value != 0; break;
+        case kLightFillShadows: e.fill_shadows = !e.fill_shadows; break;
+        case kLightSize: e.size = std::max(0, value); break;
+        default: return;
+    }
+    if (e == fixes_.light_export) return;
+    history_.record(fixes_);
+    fixes_.light_export = e;
+    fixes_changed(/*save=*/true);
+}
+
+int EditorApp::light_value(int option) const {
+    switch (option) {
+        case kLightLinear: return fixes_.light_export.linear ? 1 : 0;
+        case kLightFillShadows: return fixes_.light_export.fill_shadows ? 1 : 0;
+        case kLightSize: return fixes_.light_export.size;
+        default: return 0;
+    }
+}
+
+void EditorApp::refresh_light_controls() {
+    editor::LightTool* tool = root_.light_tool();
+    tool->forget_missing();
+    const fixes::LightCrop* crop = fixes_.find_light(tool->selected());
+    std::string size;
+    if (crop) {
+        int w = 0, h = 0;
+        light::output_size(crop->at(std::max<std::int64_t>(shown_, 0)), fixes_.light_export.size, &w, &h);
+        size = std::to_string(w) + " \xC3\x97 " + std::to_string(h) +
+               (fixes_.light_export.size > 0 ? " \xC2\xB7 long side set" : " \xC2\xB7 its own size");
+    }
+    root_.inspector()->light_controls()->bind(crop, size);
+    if (root_.tool() == editor::Tool::kLight) root_.inspector()->set_heading(tool->heading());
 }
 
 bool EditorApp::can_export() const {
@@ -452,10 +521,31 @@ void EditorApp::show_export_dialog(int format_index) {
         format_index >= static_cast<int>(std::size(media::kExportFormats)))
         return;
     const media::ExportFormatInfo& info = media::kExportFormats[format_index];
+    if (info.kind == media::ExportKind::kLight) {
+        // Light maps are a file (or folder) for each crop: asked for is the
+        // folder they go in, starting beside the clip.
+        if (!can_export_lights()) return;
+        pending_export_format_ = format_index;
+        static std::string start;
+        start = std::filesystem::absolute(clip_.path()).parent_path().string() + "/";
+        SDL_ShowOpenFolderDialog(
+            [](void* self, const char* const* files, int) {
+                if (!files || !files[0]) return;
+                auto* app = static_cast<EditorApp*>(self);
+                SDL_Event event = {};
+                event.type = app->export_event_;
+                event.user.data1 = SDL_strdup(files[0]);
+                event.user.code = app->pending_export_format_;
+                SDL_PushEvent(&event);
+            },
+            this, gpu_->window(), start.c_str(), /*allow_many=*/false);
+        return;
+    }
+    if (!can_export()) return;
     // Suggested beside the clip, named for it and what it holds -- with a
     // space, not the underscore the app's own renders use, so the suggestion
     // is never one of them.
-    const std::string name = clip_name_ + (info.subject ? " subject" : " matte") + info.extension;
+    const std::string name = clip_name_ + (info.subject() ? " subject" : " matte") + info.extension;
     const std::string where =
         (std::filesystem::absolute(clip_.path()).parent_path() / name).string();
     // One filter, the format's own; a PNG sequence is a folder, and has none.
@@ -479,8 +569,20 @@ void EditorApp::show_export_dialog(int format_index) {
 }
 
 void EditorApp::start_export(const std::string& chosen, int format_index) {
-    if (!can_export()) return;
     const media::ExportFormatInfo& info = media::kExportFormats[format_index];
+    if (info.kind == media::ExportKind::kLight) {
+        if (!can_export_lights()) return;
+        if (job_.start(MatteJob::Kind::kLights, clip_.path(), options_.lut_path, options_.render_dir,
+                       clip_name_, chosen, info.id)) {
+            job_started_ns_ = SDL_GetTicksNS();
+            export_to_ = std::to_string(fixes_.lights.size()) +
+                         (fixes_.lights.size() == 1 ? " light map" : " light maps");
+            export_status_ = "starting";
+        }
+        refresh_matte_ui();
+        return;
+    }
+    if (!can_export()) return;
     // The format's extension, whatever was typed.
     std::filesystem::path path(chosen);
     if (info.extension[0]) path.replace_extension(info.extension);
@@ -614,7 +716,8 @@ void EditorApp::refresh_matte_ui() {
     }
     inspector->set_row("re-matte", rematte_row);
 
-    const bool exporting = job_.running() && job_.kind() == MatteJob::Kind::kExport;
+    const bool exporting = job_.running() && (job_.kind() == MatteJob::Kind::kExport ||
+                                              job_.kind() == MatteJob::Kind::kLights);
     std::string export_row = export_status_;
     std::int64_t exported = 0, export_total = 0;
     if (exporting && job_.export_progress(&exported, &export_total) && exported > 0) {
@@ -652,7 +755,12 @@ void EditorApp::refresh_matte_ui() {
 
     const std::size_t to_make = patches_.frames_to_make();
     if (exporting) {
-        inspector->set_action("stop exporting", true);
+        // The share done on the pill too: the card's rows are hidden while
+        // the light tool's controls are in their place.
+        std::string label = "stop exporting";
+        if (exported > 0 && export_total > 0)
+            label += " \xC2\xB7 " + std::to_string(exported * 100 / export_total) + "%";
+        inspector->set_action(label, true);
     } else if (root_.tool() == editor::Tool::kRematte && !(job_.running() && !rematting)) {
         if (!clip_.is_open() || !job_.available())
             inspector->set_action("re-matte", false);
@@ -686,7 +794,8 @@ void EditorApp::refresh_matte_ui() {
 void EditorApp::toggle_job() {
     if (job_.running()) {
         // A stopped export leaves its .partial behind, never the file itself.
-        if (job_.kind() == MatteJob::Kind::kExport) export_status_ = "stopped";
+        if (job_.kind() == MatteJob::Kind::kExport || job_.kind() == MatteJob::Kind::kLights)
+            export_status_ = "stopped";
         job_.stop();
     } else if (clip_.is_open() && root_.tool() == editor::Tool::kRematte) {
         if (job_.start(MatteJob::Kind::kRematte, clip_.path(), options_.lut_path,
@@ -722,7 +831,7 @@ void EditorApp::poll_job() {
     // Patches the same way: a rescan that finds new ones refreshes the frame
     // on screen if they are its.
     const bool rematting = job_.kind() == MatteJob::Kind::kRematte;
-    const bool exporting = job_.kind() == MatteJob::Kind::kExport;
+    const bool exporting = job_.kind() == MatteJob::Kind::kExport || job_.kind() == MatteJob::Kind::kLights;
     if ((rematting || exporting) && patches_.rescan()) ++subject_version_;
     else if (frames_.rescan() &&
              ((frames_.matted(shown_) && frames_.shown() != shown_) || frames_.shown_outdated(shown_))) {
@@ -756,6 +865,7 @@ void EditorApp::fixes_changed(bool save) {
     patches_.set_fixes(fixes_);
     ++subject_version_;
     update_plate();
+    refresh_light_controls();
     refresh_matte_ui();
     // A file that would not read is never written over: whatever is in it
     // may be the only copy of someone's work.
@@ -826,6 +936,7 @@ void EditorApp::handle(const SDL_Event& event) {
             if (root_.garbage_tool()->handle_key(event.key.key, event.key.mod)) break;
             if (root_.paint_tool()->handle_key(event.key.key, event.key.mod)) break;
             if (root_.rematte_tool()->handle_key(event.key.key, event.key.mod)) break;
+            if (root_.light_tool()->handle_key(event.key.key, event.key.mod)) break;
             if ((event.key.mod & (SDL_KMOD_GUI | SDL_KMOD_CTRL)) != 0 && event.key.key == SDLK_Z) {
                 undo(/*redo=*/(event.key.mod & SDL_KMOD_SHIFT) != 0);
                 break;
@@ -1019,6 +1130,7 @@ void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, 
     root_.garbage_tool()->set_frame(std::max<std::int64_t>(shown_, 0));
     root_.paint_tool()->set_frame(std::max<std::int64_t>(shown_, 0));
     root_.rematte_tool()->set_frame(std::max<std::int64_t>(shown_, 0));
+    root_.light_tool()->set_frame(std::max<std::int64_t>(shown_, 0));
     root_.layout(static_cast<float>(lw), static_cast<float>(lh));
     input_.update(root_);
     animating_ = root_.tick(dt);

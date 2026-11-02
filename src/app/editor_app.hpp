@@ -90,6 +90,12 @@ private:
     bool can_export() const;
     void show_export_dialog(int format_index);
     void start_export(const std::string& path, int format_index);
+    // Light maps: every crop, as the fixes' LightExport says, into a folder.
+    bool can_export_lights() const;
+    void light_option(int option, int value);
+    int light_value(int option) const;
+    // The card's controls, bound to the light tool's selected crop.
+    void refresh_light_controls();
     // Clip > the clean plate: marks its frames at the playhead, clears it,
     // or turns its override on and off (PlateAction).
     void plate_action(int action);

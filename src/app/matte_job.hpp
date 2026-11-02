@@ -35,7 +35,7 @@ public:
     // its re-matte boxes want (--rematte-clip), an export of it
     // (--export-clip), or its clean plate (--plate-clip). One at a time --
     // they all want the GPU.
-    enum class Kind { kMatte, kRematte, kExport, kPlate };
+    enum class Kind { kMatte, kRematte, kExport, kPlate, kLights };
 
     // `lut` may be empty. Output goes under `out`, where the viewer reads it;
     // the run's own output goes to a log there.

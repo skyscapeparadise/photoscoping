@@ -4,6 +4,7 @@
 #include "editor/inspector.hpp"
 #include "editor/paint_tool.hpp"
 #include "editor/rematte_tool.hpp"
+#include "editor/light_tool.hpp"
 #include "editor/timeline.hpp"
 #include "editor/viewer.hpp"
 #include "gpu/icon_atlas.hpp"
@@ -34,6 +35,7 @@ public:
     GarbageTool* garbage_tool() const { return garbage_; }
     PaintTool* paint_tool() const { return paint_; }
     RematteTool* rematte_tool() const { return rematte_; }
+    LightTool* light_tool() const { return light_; }
     Tool tool() const { return inspector_->tools()->tool(); }
     // After the window's own response to a change of tool.
     std::function<void(Tool)> on_tool_changed;
@@ -62,6 +64,7 @@ private:
     GarbageTool* garbage_ = nullptr;
     PaintTool* paint_ = nullptr;
     RematteTool* rematte_ = nullptr;
+    LightTool* light_ = nullptr;
     Inspector* inspector_ = nullptr;
     Timeline* timeline_ = nullptr;
     ui::Node* splitter_ = nullptr;

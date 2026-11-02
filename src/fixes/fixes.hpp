@@ -95,6 +95,39 @@ struct Rematte : Track {
     void normalize();
 };
 
+// A light map's crop: four corners on the backdrop -- top left, top right,
+// bottom right, bottom left -- whose light, straightened to a rectangle, is
+// exported frame by frame as an emissive texture (light/light_map.hpp). Held
+// before its first key and after its last, like a garbage matte: a crop is a
+// place, and a locked-off shot keeps it there.
+//
+// Its colour can be adjusted as Photoshop's Hue/Saturation adjusts it: hue
+// -180..180, saturation and lightness -100..100; colorized, hue is 0..360
+// and saturation 0..100.
+struct LightCrop : Track {
+    std::string name;
+    float hue = 0.0f;
+    float saturation = 0.0f;
+    float lightness = 0.0f;
+    bool colorize = false;
+    bool adjusted() const { return colorize || hue != 0.0f || saturation != 0.0f || lightness != 0.0f; }
+};
+
+// How the clip's light maps are exported, whatever the format.
+struct LightExport {
+    // The light itself, linear and unclipped, before any grade -- or the
+    // look, as the viewer shows it.
+    bool linear = true;
+    // Fill in the performer's shadow on the backdrop too, not only the
+    // performer.
+    bool fill_shadows = false;
+    // The long side in pixels; 0 for the crop's own size.
+    int size = 0;
+    friend bool operator==(const LightExport& a, const LightExport& b) {
+        return a.linear == b.linear && a.fill_shadows == b.fill_shadows && a.size == b.size;
+    }
+};
+
 // A clean plate (matting/plate.hpp): the frames of the clip where the set is
 // empty, from first to last, averaged. Optional. By default it refines edges
 // and colour only; with `correct` it also overrules the model where the matte
@@ -125,6 +158,8 @@ struct Fixes {
     std::vector<Stroke> strokes;
     std::vector<Rematte> rematte;
     PlateRange plate;
+    std::vector<LightCrop> lights;
+    LightExport light_export;
     int next_id = 1;
 
     Garbage* find(int id);
@@ -142,6 +177,12 @@ struct Fixes {
     // A new box with one key, at `frame`. Returns its id.
     int add_rematte(std::int64_t frame, Point a, Point b);
     bool remove_rematte(int id);
+    LightCrop* find_light(int id);
+    const LightCrop* find_light(int id) const;
+    // A new crop with one key, at `frame`, named "light N" for the lowest N
+    // not taken. Returns its id.
+    int add_light(std::int64_t frame, std::vector<Point> corners);
+    bool remove_light(int id);
     bool empty() const { return garbage.empty() && strokes.empty() && rematte.empty(); }
     // Every frame any fix has a key on, ascending, once each.
     std::vector<std::int64_t> key_frames() const;

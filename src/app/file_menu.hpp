@@ -15,7 +15,15 @@ struct FileMenuActions {
     void (*plate)(void* context, int action) = nullptr;
     // What the Clip menu shows (PlateState bits).
     int (*plate_state)(void* context) = nullptr;
+    // Whether light maps can be exported now.
+    bool (*can_export_lights)(void* context) = nullptr;
+    // A light-map export setting (LightOption) set to a value, and what each
+    // is now.
+    void (*light_option)(void* context, int option, int value) = nullptr;
+    int (*light_value)(void* context, int option) = nullptr;
 };
+
+enum LightOption { kLightLinear = 0, kLightFillShadows = 1, kLightSize = 2 };
 
 enum PlateAction { kPlateStart = 0, kPlateEnd = 1, kPlateClear = 2, kPlateCorrect = 3 };
 enum PlateState { kPlateClipOpen = 1, kPlateIsSet = 2, kPlateCorrects = 4 };
@@ -27,6 +35,9 @@ enum PlateState { kPlateClipOpen = 1, kPlateIsSet = 2, kPlateCorrects = 4 };
 //   Export Subject  >       ProRes 4444 with Alpha (Command-E), VP9 with
 //                           Alpha, PNG Sequence
 //   Export Matte    >       ProRes 422, ProRes 422 LT, HEVC, H.264
+//   Export Light Maps >     HEVC, ProRes 422, 422 LT, 4444, H.264, VP9, PNG
+//                           and EXR Sequences; Linear Light or Graded Look;
+//                           Fill the Performer's Shadow; Size >
 //
 // and a Clip menu, for the clean plate:
 //

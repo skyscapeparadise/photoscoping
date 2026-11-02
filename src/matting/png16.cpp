@@ -65,7 +65,8 @@ bool write_samples(const std::string& path, const std::vector<std::uint16_t>& sa
     put32(header, static_cast<std::uint32_t>(width));
     put32(header, static_cast<std::uint32_t>(height));
     // 16-bit; greyscale or RGBA; then the defaults.
-    header.insert(header.end(), {16, static_cast<std::uint8_t>(channels == 4 ? 6 : 0), 0, 0, 0});
+    header.insert(header.end(),
+                  {16, static_cast<std::uint8_t>(channels == 4 ? 6 : channels == 3 ? 2 : 0), 0, 0, 0});
     chunk(out, "IHDR", header.data(), header.size());
     chunk(out, "IDAT", packed.data(), packed_size);
     chunk(out, "IEND", nullptr, 0);
@@ -104,6 +105,11 @@ bool write_png16_rgba(const std::string& path, const std::vector<std::uint16_t>&
     // Deflate's fastest: a 4K frame is 66 MB of samples, and the default
     // takes five times as long for files a sixth smaller.
     return write_samples(path, rgba, width, height, 4, 1);
+}
+
+bool write_png16_rgb(const std::string& path, const std::vector<std::uint16_t>& rgb, int width,
+                     int height) {
+    return write_samples(path, rgb, width, height, 3, 1);
 }
 
 bool read_png16(const std::string& path, std::vector<float>* values, int* width, int* height) {

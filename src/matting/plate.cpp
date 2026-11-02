@@ -151,7 +151,7 @@ PlateImage halve_plate(const PlateImage& plate) {
 }
 
 std::vector<float> relight_plate(const PlateImage& plate, const MattingFrame& frame,
-                                 const std::vector<float>& alpha) {
+                                 const std::vector<float>& alpha, int margin) {
     const int w = frame.width, h = frame.height;
     if (plate.width != w || plate.height != h) return {};
     const std::size_t pixels = static_cast<std::size_t>(w) * h;
@@ -160,7 +160,7 @@ std::vector<float> relight_plate(const PlateImage& plate, const MattingFrame& fr
     // gives the subject: an edge's spill is not the wall's light.
     std::vector<std::uint8_t> subject(pixels);
     for (std::size_t i = 0; i < pixels; ++i) subject[i] = alpha[i] >= 0.02f;
-    const std::vector<std::uint8_t> near = dilate_cross(subject, w, h, 6);
+    const std::vector<std::uint8_t> near = dilate_cross(subject, w, h, margin);
     std::vector<float> known(pixels);
     std::size_t visible = 0;
     for (std::size_t i = 0; i < pixels; ++i) {

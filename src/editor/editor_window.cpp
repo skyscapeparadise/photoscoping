@@ -52,6 +52,8 @@ void EditorWindow::build(ui::FontCache& fonts, const gpu::IconAtlas& large_icons
     rematte_->on_heading_changed = [this] {
         if (rematte_->active()) inspector_->set_heading(rematte_->heading());
     };
+    light_ = viewer_->add<LightTool>();
+    light_->attach(viewer_, fixes);
 
     inspector_ = add<Inspector>();
     inspector_->build(fonts, large_icons);
@@ -60,6 +62,9 @@ void EditorWindow::build(ui::FontCache& fonts, const gpu::IconAtlas& large_icons
         garbage_->set_active(tool == Tool::kGarbage);
         paint_->set_active(tool == Tool::kPaint);
         rematte_->set_active(tool == Tool::kRematte);
+        light_->set_active(tool == Tool::kLight);
+        inspector_->show_light_controls(tool == Tool::kLight);
+        if (tool == Tool::kLight) inspector_->set_heading(light_->heading());
         if (tool == Tool::kPaint) inspector_->set_heading(paint_->heading());
         if (tool == Tool::kGarbage) inspector_->set_heading(garbage_->heading());
         if (tool == Tool::kRematte) inspector_->set_heading(rematte_->heading());

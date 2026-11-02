@@ -19,7 +19,8 @@ namespace ps::editor {
 //   garbage   draw and keyframe garbage mattes
 //   rematte   a box the stack re-runs in at more detail
 //   paint     paint coverage out of the matte and back in
-enum class Tool { kSelect, kNavigate, kGarbage, kRematte, kPaint };
+//   light     four-corner crops of the backdrop, exported as light maps
+enum class Tool { kSelect, kNavigate, kGarbage, kRematte, kPaint, kLight };
 
 // Lowercase, as the inspector shows it.
 const char* tool_label(Tool tool);

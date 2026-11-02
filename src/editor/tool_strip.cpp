@@ -8,10 +8,10 @@ namespace ps::editor {
 
 namespace {
 
-constexpr int kButtons = 6;
-constexpr float kMinButton = 44.0f;
+constexpr int kButtons = 7;
+constexpr float kMinButton = 34.0f;
 constexpr float kMaxButton = 84.0f;
-constexpr float kMinGap = 8.0f;
+constexpr float kMinGap = 6.0f;
 // Understory's proportions: a 56px hand in a 72px button with 12px corners.
 constexpr float kIconRatio = 56.0f / 72.0f;
 constexpr float kRadiusRatio = 12.0f / 72.0f;
@@ -30,6 +30,7 @@ const char* tool_label(Tool tool) {
         case Tool::kGarbage: return "garbage matte";
         case Tool::kRematte: return "re-matte";
         case Tool::kPaint: return "paint";
+        case Tool::kLight: return "light map";
     }
     return "select";
 }
@@ -53,6 +54,7 @@ void ToolStrip::build(const gpu::IconAtlas& atlas, ui::FontCache& fonts) {
         {nullptr, "garbage", Tool::kGarbage, false, true},
         {nullptr, "re-matte", Tool::kRematte, false, true},
         {nullptr, "paint", Tool::kPaint, false, true},
+        {nullptr, "light", Tool::kLight, false, true},
         {"preview", nullptr, Tool::kSelect, true, true},
     };
 
@@ -131,7 +133,7 @@ void ToolStrip::layout_self() {
             b.icon->height = icon;
         }
         // Sized to the longest name, "re-matte", across the button.
-        if (b.label) b.label->pixel_size = std::max(10.0f, size * 0.19f);
+        if (b.label) b.label->pixel_size = std::max(8.0f, size * 0.19f);
     }
 }
 

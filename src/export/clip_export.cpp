@@ -202,6 +202,80 @@ std::vector<float> plate_pass(const matting::MattingFrame& frame, const std::vec
     return refined;
 }
 
+void MatteComposer::open(const std::string& render_dir, const std::string& clip_stem,
+                         const fixes::Fixes& fixes, int width, int height, std::int64_t frame_count,
+                         const std::string& models, bool model_cpu, const matting::PlateImage* plate) {
+    render_dir_ = render_dir;
+    stem_ = clip_stem;
+    fixes_ = fixes;
+    width_ = width;
+    height_ = height;
+    models_ = models;
+    model_cpu_ = model_cpu;
+    plate_ = plate;
+    jobs_ = fixes::rematte_jobs(fixes, frame_count, width, height);
+    stack_.reset();
+}
+
+bool MatteComposer::check(std::int64_t first, std::int64_t last, std::string* error) const {
+    std::error_code ec;
+    const fs::path mattes = fs::path(render_dir_) / (stem_ + "_mattes");
+    const fs::path plate_mattes = fs::path(render_dir_) / fixes::plate_mattes_name(stem_, fixes_.plate);
+    for (std::int64_t f = first; f <= last; ++f)
+        if (!fs::exists(mattes / frame_name(f), ec) ||
+            (fixes_.plate.set() && !fs::exists(plate_mattes / frame_name(f), ec))) {
+            *error = "frame " + std::to_string(f) + " has no matte" +
+                     (fixes_.plate.set() ? " refined by the plate" : "") + "; matte the clip first";
+            return false;
+        }
+    return true;
+}
+
+std::vector<float> MatteComposer::compose(std::int64_t f, const matting::MattingFrame& frame,
+                                          std::string* error) {
+    std::vector<float> alpha = read_shown_matte(render_dir_, stem_, fixes_, f, width_, height_);
+    if (alpha.empty()) {
+        *error = "cannot read the matte";
+        return {};
+    }
+    // The patches, in the order the viewer folds them, each blended over the
+    // frame's own matte as it was before any of them.
+    const fs::path patches_dir = fs::path(render_dir_) / (stem_ + "_rematte");
+    const std::vector<float> base = alpha;
+    std::error_code ec;
+    for (const fixes::PatchJob& j : jobs_) {
+        if (j.frame != f) continue;
+        const std::string path = (patches_dir / fixes::patch_name(f, j.box)).string();
+        std::vector<float> patch;
+        int pw = 0, ph = 0;
+        if (!matting::read_png16(path, &patch, &pw, &ph) || pw != j.box.width() || ph != j.box.height()) {
+            if (!stack_) {
+                stack_ = std::make_unique<matting::MattingStack>();
+                const auto backend =
+                    model_cpu_ ? matting::MatteModel::Backend::kCpu : matting::MatteModel::Backend::kGpu;
+                if (!stack_->load(models_, backend, matting::default_cache_dir(), error)) {
+                    *error = "cannot load the models in " + models_ + ": " + *error;
+                    stack_.reset();
+                    return {};
+                }
+            }
+            std::vector<float> wall;
+            float tolerance = 0.0f;
+            if (plate_) {
+                wall = matting::relight_plate(*plate_, frame, base);
+                tolerance = matting::plate_tolerance(frame, wall, base);
+            }
+            patch = make_patch(*stack_, frame, base, j.box, nullptr, error, wall.empty() ? nullptr : &wall,
+                               tolerance);
+            fs::create_directories(patches_dir, ec);
+            if (patch.empty() || !write_patch(path, patch, j.box, error)) return {};
+        }
+        fixes::blend_patch(alpha, width_, j.box, patch);
+    }
+    fixes::apply_fixes(fixes_, f, alpha, width_, height_);
+    return alpha;
+}
+
 bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestPass& ingest,
                 media::VideoDecoder& decoder, const gpu::InputTransform& transform) {
     const std::string stem = fs::path(request.clip).stem().string();
@@ -220,18 +294,6 @@ bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestP
         std::fprintf(stderr, "cannot read the fixes: %s\n", error.c_str());
         return false;
     }
-    // With a plate set, every frame refined by it too: an export is of the
-    // matte as the viewer shows it.
-    const fs::path mattes = fs::path(request.render_dir) / (stem + "_mattes");
-    const fs::path plate_mattes =
-        fs::path(request.render_dir) / fixes::plate_mattes_name(stem, fixes.plate);
-    for (std::int64_t f = first; f <= last; ++f)
-        if (!fs::exists(mattes / frame_name(f), ec) ||
-            (fixes.plate.set() && !fs::exists(plate_mattes / frame_name(f), ec))) {
-            std::fprintf(stderr, "frame %lld has no matte%s; matte the clip first\n",
-                         static_cast<long long>(f), fixes.plate.set() ? " refined by the plate" : "");
-            return false;
-        }
     matting::PlateImage plate;
     if (fixes.plate.set() &&
         !obtain_plate(request.render_dir, stem, fixes.plate, gpu, ingest, decoder, transform, &plate,
@@ -239,23 +301,13 @@ bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestP
         std::fprintf(stderr, "cannot make the clean plate: %s\n", error.c_str());
         return false;
     }
-    const fs::path patches_dir = fs::path(request.render_dir) / (stem + "_rematte");
-    std::vector<fixes::PatchJob> jobs = fixes::rematte_jobs(fixes, total, w, h);
-
-    // The models, only if a patch is missing.
-    std::unique_ptr<matting::MattingStack> stack;
-    auto need_stack = [&]() -> matting::MattingStack* {
-        if (stack) return stack.get();
-        stack = std::make_unique<matting::MattingStack>();
-        const auto backend = request.model_cpu ? matting::MatteModel::Backend::kCpu
-                                               : matting::MatteModel::Backend::kGpu;
-        if (!stack->load(request.models, backend, matting::default_cache_dir(), &error)) {
-            std::fprintf(stderr, "cannot load the models in %s: %s\n", request.models.c_str(),
-                         error.c_str());
-            stack.reset();
-        }
-        return stack.get();
-    };
+    MatteComposer composer;
+    composer.open(request.render_dir, stem, fixes, w, h, total, request.models, request.model_cpu,
+                  plate.empty() ? nullptr : &plate);
+    if (!composer.check(first, last, &error)) {
+        std::fprintf(stderr, "%s\n", error.c_str());
+        return false;
+    }
 
     const fs::path out(request.out);
     const fs::path partial = partial_of(out);
@@ -294,7 +346,7 @@ bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestP
     }
     const Uint64 started = SDL_GetTicksNS();
     const std::size_t pixels = static_cast<std::size_t>(w) * h;
-    std::vector<std::uint16_t> samples(pixels * (info.subject ? 4 : 1));
+    std::vector<std::uint16_t> samples(pixels * (info.subject() ? 4 : 1));
     for (std::int64_t f = first; f <= last; ++f) {
         if (f > first && !decoder.read_next()) {
             std::fprintf(stderr, "cannot decode frame %lld\n", static_cast<long long>(f));
@@ -308,42 +360,13 @@ bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestP
         const matting::MattingFrame frame = matting::prepare_frame(
             ingest.read_working(), static_cast<int>(ingest.width()), static_cast<int>(ingest.height()));
 
-        std::vector<float> alpha = read_shown_matte(request.render_dir, stem, fixes, f, w, h);
+        const std::vector<float> alpha = composer.compose(f, frame, &error);
         if (alpha.empty()) {
-            std::fprintf(stderr, "cannot read the matte for frame %lld\n", static_cast<long long>(f));
+            std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(f), error.c_str());
             return false;
         }
-        // The patches, in the order the viewer folds them, each blended over
-        // the frame's own matte as it was before any of them.
-        const std::vector<float> base = alpha;
-        for (const fixes::PatchJob& j : jobs) {
-            if (j.frame != f) continue;
-            const std::string path = (patches_dir / fixes::patch_name(f, j.box)).string();
-            std::vector<float> patch;
-            int pw = 0, ph = 0;
-            if (!matting::read_png16(path, &patch, &pw, &ph) || pw != j.box.width() ||
-                ph != j.box.height()) {
-                matting::MattingStack* s = need_stack();
-                if (!s) return false;
-                std::vector<float> wall;
-                float tolerance = 0.0f;
-                if (!plate.empty()) {
-                    wall = matting::relight_plate(plate, frame, base);
-                    tolerance = matting::plate_tolerance(frame, wall, base);
-                }
-                patch = make_patch(*s, frame, base, j.box, nullptr, &error,
-                                   wall.empty() ? nullptr : &wall, tolerance);
-                fs::create_directories(patches_dir, ec);
-                if (patch.empty() || !write_patch(path, patch, j.box, &error)) {
-                    std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(f), error.c_str());
-                    return false;
-                }
-            }
-            fixes::blend_patch(alpha, w, j.box, patch);
-        }
-        fixes::apply_fixes(fixes, f, alpha, w, h);
 
-        if (info.subject) {
+        if (info.subject()) {
             // The subject's own colour, the wall's spill taken out of its
             // edges -- straight, not premultiplied, as all three formats
             // carry it.

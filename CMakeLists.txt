@@ -113,6 +113,7 @@ target_include_directories(photoscoping_fixes PUBLIC src "${CMAKE_CURRENT_SOURCE
 add_library(photoscoping_media STATIC
     src/media/video_decoder.cpp
     src/media/video_encoder.cpp
+    src/media/exr_writer.cpp
     src/media/frame_worker.cpp
 )
 target_include_directories(photoscoping_media PUBLIC src)
@@ -124,6 +125,13 @@ target_link_libraries(photoscoping_media PUBLIC
     PkgConfig::AVUTIL
     PkgConfig::SWSCALE
 )
+# zlib for the EXR writer, linked as the matting library links it (below).
+if(APPLE)
+    target_link_libraries(photoscoping_media PUBLIC z)
+else()
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(photoscoping_media PUBLIC ZLIB::ZLIB)
+endif()
 
 # The matting stack, natively: preparing a frame for the model and running it.
 # No GPU of SDL's and no window, so it can be tested headless.
@@ -195,6 +203,8 @@ add_library(photoscoping_ui STATIC
     src/editor/garbage_tool.cpp
     src/editor/paint_tool.cpp
     src/editor/rematte_tool.cpp
+    src/editor/light_tool.cpp
+    src/editor/light_controls.cpp
 )
 add_dependencies(photoscoping_ui photoscoping_shaders)
 target_include_directories(photoscoping_ui PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -211,7 +221,8 @@ add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep
                             src/app/matte_frames.cpp src/app/matte_job.cpp
                             src/app/clip_frames.cpp src/app/mask_texture.cpp
                             src/app/rematte_patches.cpp src/app/subject_estimate.cpp
-                            src/export/clip_export.cpp)
+                            src/export/clip_export.cpp src/export/light_export.cpp
+                            src/light/light_map.cpp)
 target_link_libraries(photoscoping PRIVATE photoscoping_ui photoscoping_matting photoscoping_fixes)
 
 if(APPLE)
@@ -231,6 +242,6 @@ add_executable(fixes_tests tests/test_fixes.cpp)
 target_link_libraries(fixes_tests PRIVATE photoscoping_fixes)
 add_test(NAME fixes COMMAND fixes_tests)
 
-add_executable(export_tests tests/test_export.cpp)
-target_link_libraries(export_tests PRIVATE photoscoping_matting photoscoping_media)
+add_executable(export_tests tests/test_export.cpp src/light/light_map.cpp)
+target_link_libraries(export_tests PRIVATE photoscoping_matting photoscoping_media photoscoping_fixes)
 add_test(NAME export COMMAND export_tests)

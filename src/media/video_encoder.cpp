@@ -34,7 +34,15 @@ Recipe recipe_for(ExportFormat format) {
         case ExportFormat::kMatteProRes422Lt: return {"prores_ks", "mov", AV_PIX_FMT_YUV422P10LE};
         case ExportFormat::kMatteHevc: return {"hevc_videotoolbox", "mp4", AV_PIX_FMT_P010LE};
         case ExportFormat::kMatteH264: return {"h264_videotoolbox", "mp4", AV_PIX_FMT_NV12};
-        case ExportFormat::kPngSequence: break;
+        case ExportFormat::kLightHevc: return {"hevc_videotoolbox", "mp4", AV_PIX_FMT_P010LE};
+        case ExportFormat::kLightProRes422:
+        case ExportFormat::kLightProRes422Lt: return {"prores_ks", "mov", AV_PIX_FMT_YUV422P10LE};
+        case ExportFormat::kLightProRes4444: return {"prores_ks", "mov", AV_PIX_FMT_YUV444P10LE};
+        case ExportFormat::kLightH264: return {"h264_videotoolbox", "mp4", AV_PIX_FMT_NV12};
+        case ExportFormat::kLightVp9: return {"libvpx-vp9", "webm", AV_PIX_FMT_YUV420P};
+        case ExportFormat::kPngSequence:
+        case ExportFormat::kLightPng:
+        case ExportFormat::kLightExr: break;
     }
     return {nullptr, nullptr, AV_PIX_FMT_NONE};
 }
@@ -54,7 +62,8 @@ bool VideoEncoder::open(const std::string& path, ExportFormat format, int width,
     format_ = format;
     width_ = width;
     height_ = height;
-    const bool subject = export_format_info(format).subject;
+    // Subject and light maps come as RGBA, the matte as grey.
+    const bool subject = export_format_info(format).kind != ExportKind::kMatte;
 
     const AVCodec* codec = avcodec_find_encoder_by_name(r.encoder);
     if (!codec) {
@@ -84,7 +93,10 @@ bool VideoEncoder::open(const std::string& path, ExportFormat format, int width,
     codec_->framerate = AVRational{rate_num, rate_den};
     codec_->sample_aspect_ratio = AVRational{1, 1};
     codec_->color_primaries = AVCOL_PRI_BT709;
-    codec_->color_trc = AVCOL_TRC_BT709;
+    // A light map is encoded with sRGB's curve -- what Blender assumes of a
+    // video texture -- and says so; the rest are Rec.709 video.
+    codec_->color_trc = export_format_info(format).kind == ExportKind::kLight ? AVCOL_TRC_IEC61966_2_1
+                                                                              : AVCOL_TRC_BT709;
     codec_->colorspace = AVCOL_SPC_BT709;
     codec_->color_range = AVCOL_RANGE_MPEG;
     codec_->thread_count = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
@@ -98,14 +110,22 @@ bool VideoEncoder::open(const std::string& path, ExportFormat format, int width,
             av_opt_set_int(priv, "alpha_bits", 16, 0);
             av_opt_set(priv, "vendor", "apl0", 0);
             break;
+        case ExportFormat::kLightProRes4444:
+            av_opt_set(priv, "profile", "4444", 0);
+            av_opt_set_int(priv, "alpha_bits", 0, 0);
+            av_opt_set(priv, "vendor", "apl0", 0);
+            break;
+        case ExportFormat::kLightProRes422:
         case ExportFormat::kMatteProRes422:
             av_opt_set(priv, "profile", "standard", 0);
             av_opt_set(priv, "vendor", "apl0", 0);
             break;
+        case ExportFormat::kLightProRes422Lt:
         case ExportFormat::kMatteProRes422Lt:
             av_opt_set(priv, "profile", "lt", 0);
             av_opt_set(priv, "vendor", "apl0", 0);
             break;
+        case ExportFormat::kLightVp9:
         case ExportFormat::kVp9Alpha:
             // Constant quality, near enough to visually lossless for a
             // subject on transparency, at a speed that is not overnight.
@@ -115,18 +135,25 @@ bool VideoEncoder::open(const std::string& path, ExportFormat format, int width,
             av_opt_set_int(priv, "cpu-used", 2, 0);
             av_opt_set_int(priv, "row-mt", 1, 0);
             break;
+        case ExportFormat::kLightHevc:
+        case ExportFormat::kLightH264:
         case ExportFormat::kMatteHevc:
         case ExportFormat::kMatteH264:
             // VideoToolbox's constant quality, 0-100, high: a matte is mostly
             // flat, and what is not is the edge it exists for.
             codec_->flags |= AV_CODEC_FLAG_QSCALE;
             codec_->global_quality = FF_QP2LAMBDA * 80;
-            av_opt_set(priv, "profile", format == ExportFormat::kMatteHevc ? "main10" : "high", 0);
-            // hvc1 rather than hev1: QuickTime and Final Cut will not play
-            // the other.
-            if (format == ExportFormat::kMatteHevc) codec_->codec_tag = MKTAG('h', 'v', 'c', '1');
+            {
+                const bool hevc = format == ExportFormat::kMatteHevc || format == ExportFormat::kLightHevc;
+                av_opt_set(priv, "profile", hevc ? "main10" : "high", 0);
+                // hvc1 rather than hev1: QuickTime and Final Cut will not
+                // play the other.
+                if (hevc) codec_->codec_tag = MKTAG('h', 'v', 'c', '1');
+            }
             break;
-        case ExportFormat::kPngSequence: break;
+        case ExportFormat::kPngSequence:
+        case ExportFormat::kLightPng:
+        case ExportFormat::kLightExr: break;
     }
 
     ret = avcodec_open2(codec_, codec, nullptr);
@@ -183,7 +210,7 @@ bool VideoEncoder::write(const std::uint16_t* samples, std::string* error) {
         *error = "out of memory";
         return false;
     }
-    const bool subject = export_format_info(format_).subject;
+    const bool subject = export_format_info(format_).kind != ExportKind::kMatte;
     const std::uint8_t* src[1] = {reinterpret_cast<const std::uint8_t*>(samples)};
     const int src_stride[1] = {width_ * (subject ? 8 : 2)};
     sws_scale(sws_, src, src_stride, 0, height_, frame_->data, frame_->linesize);

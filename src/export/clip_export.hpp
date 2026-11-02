@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,32 @@ bool obtain_plate(const std::string& render_dir, const std::string& clip_stem,
 std::vector<float> plate_pass(const matting::MattingFrame& frame, const std::vector<float>& alpha,
                               const matting::PlateImage& plate, bool correct, std::string* error,
                               std::vector<float>* wall = nullptr, float* tolerance = nullptr);
+
+// The matte as the viewer shows it, frame by frame, at full resolution and in
+// float: the stack's (refined by the plate, if one is set), the re-matte
+// patches blended in -- made on the way if the run that makes them has not --
+// and the fixes applied. What every export starts from.
+class MatteComposer {
+public:
+    // `plate` may be empty; it must outlive this.
+    void open(const std::string& render_dir, const std::string& clip_stem, const fixes::Fixes& fixes,
+              int width, int height, std::int64_t frame_count, const std::string& models,
+              bool model_cpu, const matting::PlateImage* plate);
+    // Whether every frame from first to last has its matte (and its refined
+    // one, with a plate); the first that does not, in `error`.
+    bool check(std::int64_t first, std::int64_t last, std::string* error) const;
+    std::vector<float> compose(std::int64_t frame_index, const matting::MattingFrame& frame,
+                               std::string* error);
+
+private:
+    std::string render_dir_, stem_, models_;
+    fixes::Fixes fixes_;
+    int width_ = 0, height_ = 0;
+    bool model_cpu_ = false;
+    const matting::PlateImage* plate_ = nullptr;
+    std::vector<fixes::PatchJob> jobs_;
+    std::unique_ptr<matting::MattingStack> stack_;
+};
 
 struct ExportRequest {
     std::string clip;        // for its name

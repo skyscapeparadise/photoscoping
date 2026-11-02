@@ -7,52 +7,14 @@
 #include "color/color_space.hpp"
 #include "fixes/mask.hpp"
 #include "matting/foreground.hpp"
+#include "media/half.hpp"
 
 namespace ps::app {
 
 namespace {
 
-float half_to_float(std::uint16_t h) {
-    const std::uint32_t sign = (h & 0x8000u) << 16;
-    const std::uint32_t exponent = (h >> 10) & 0x1Fu;
-    const std::uint32_t mantissa = h & 0x3FFu;
-    std::uint32_t bits;
-    if (exponent == 0) {
-        if (mantissa == 0) {
-            bits = sign;
-        } else {
-            // Subnormal: normalised into a float.
-            int e = -1;
-            std::uint32_t m = mantissa;
-            do {
-                ++e;
-                m <<= 1;
-            } while ((m & 0x400u) == 0);
-            bits = sign | static_cast<std::uint32_t>(127 - 15 - e) << 23 | (m & 0x3FFu) << 13;
-        }
-    } else if (exponent == 31) {
-        bits = sign | 0x7F800000u | mantissa << 13;
-    } else {
-        bits = sign | (exponent + 127 - 15) << 23 | mantissa << 13;
-    }
-    float f;
-    std::memcpy(&f, &bits, sizeof f);
-    return f;
-}
-
-// Rounded to nearest; what the estimate makes is 0..1, so the normal range
-// and zero are all that need to be right.
-std::uint16_t float_to_half(float f) {
-    if (!(f > 6.1e-5f)) return 0;  // zero, negatives and subnormals
-    if (f >= 65504.0f) return 0x7BFF;
-    std::uint32_t bits;
-    std::memcpy(&bits, &f, sizeof bits);
-    const std::uint32_t exponent = ((bits >> 23) & 0xFFu) - 127 + 15;
-    std::uint32_t mantissa = bits & 0x7FFFFFu;
-    std::uint32_t half = exponent << 10 | mantissa >> 13;
-    if ((mantissa & 0x1FFFu) > 0x1000u || ((mantissa & 0x1FFFu) == 0x1000u && (half & 1u))) ++half;
-    return static_cast<std::uint16_t>(half);
-}
+using media::float_to_half;
+using media::half_to_float;
 
 }  // namespace
 

@@ -7,7 +7,9 @@
 #include <string>
 #include <vector>
 
+#include "light/light_map.hpp"
 #include "matting/foreground.hpp"
+#include "media/exr_writer.hpp"
 #include "matting/plate.hpp"
 #include "matting/png16.hpp"
 #include "matting/stack.hpp"
@@ -69,13 +71,13 @@ void test_encoders() {
             grey[i] = v;
         }
     for (const media::ExportFormatInfo& info : media::kExportFormats) {
-        if (info.format == media::ExportFormat::kPngSequence) continue;
+        if (info.sequence()) continue;
         const std::string path = temp((std::string("photoscoping_test_") + info.id + info.extension).c_str()).string();
         media::VideoEncoder encoder;
         std::string error;
         bool ok = encoder.open(path, info.format, w, h, 24000, 1001, &error);
         for (int f = 0; ok && f < frames; ++f)
-            ok = encoder.write(info.subject ? rgba.data() : grey.data(), &error);
+            ok = encoder.write(info.kind == media::ExportKind::kMatte ? grey.data() : rgba.data(), &error);
         ok = ok && encoder.finish(&error);
         if (!ok) std::printf("  %s: %s\n", info.id, error.c_str());
         CHECK(ok);
@@ -206,12 +208,118 @@ void test_plate() {
     CHECK(mean(166, 70, 186, 90) < 0.1);    // the shadow is not filled
 }
 
+void test_light_maps() {
+    // The homography lands each corner of the output on the crop's corner.
+    const std::vector<fixes::Point> quad = {{100, 50}, {420, 80}, {400, 300}, {120, 330}};
+    const light::Homography hm = light::quad_homography(quad, 300, 250);
+    const double out[4][2] = {{0, 0}, {300, 0}, {300, 250}, {0, 250}};
+    for (int k = 0; k < 4; ++k) {
+        double x, y;
+        hm.map(out[k][0], out[k][1], &x, &y);
+        CHECK(std::fabs(x - quad[k].x) < 1e-3 && std::fabs(y - quad[k].y) < 1e-3);
+    }
+    int w = 0, h = 0;
+    light::output_size(quad, 0, &w, &h);
+    CHECK(w == 321 && h == 281);
+    light::output_size(quad, 160, &w, &h);
+    CHECK(std::max(w, h) == 160);
+
+    // Warped square to the frame, a crop is the frame's own pixels.
+    const int fw = 64, fh = 48;
+    const std::size_t fn = static_cast<std::size_t>(fw) * fh;
+    std::vector<float> ramp(fn * 3);
+    for (std::size_t i = 0; i < fn; ++i)
+        for (int c = 0; c < 3; ++c) ramp[c * fn + i] = static_cast<float>(i % fw) / fw;
+    const std::vector<fixes::Point> square = {{8, 8}, {40, 8}, {40, 40}, {8, 40}};
+    const std::vector<float> crop = light::warp(ramp, 3, fw, fh, light::quad_homography(square, 32, 32), 32, 32);
+    CHECK(std::fabs(crop[5] - ramp[8 * fw + 13]) < 1e-4f);
+
+    // A smooth light -- a quadratic -- is recovered from the backdrop around
+    // a hole, even with a dark patch on the wall pulling at it.
+    const int sw = 200, sh = 150;
+    const std::size_t sn = static_cast<std::size_t>(sw) * sh;
+    std::vector<float> wall(sn * 3);
+    std::vector<std::uint8_t> hidden(sn, 0);
+    auto light_at = [](double x, double y) { return 0.4 + 0.001 * x - 0.0005 * y + 0.000004 * x * x; };
+    for (int y = 0; y < sh; ++y)
+        for (int x = 0; x < sw; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y) * sw + x;
+            const bool patch = x > 20 && x < 30 && y > 20 && y < 30;
+            for (int c = 0; c < 3; ++c) wall[c * sn + i] = patch ? 0.05f : static_cast<float>(light_at(x + 0.5, y + 0.5));
+            hidden[i] = x > 80 && x < 140 && y > 40 && y < 110;
+        }
+    const std::vector<fixes::Point> region = {{70, 30}, {150, 30}, {150, 120}, {70, 120}};
+    const light::LightSurface surface = light::fit_light_surface(wall, hidden, sw, sh, region);
+    CHECK(surface.terms == 6);
+    CHECK(std::fabs(surface.at(0, 110.5, 75.5) - light_at(110.5, 75.5)) < 0.003);
+
+    // Filled: the backdrop that shows is left as it is, and what is hidden
+    // comes back from the estimate, matched at its edge.
+    const int cw = 40, ch = 30;
+    const std::size_t cn = static_cast<std::size_t>(cw) * ch;
+    std::vector<float> seen(cn * 3), estimate(cn * 3), alpha(cn, 0.0f);
+    for (std::size_t i = 0; i < cn; ++i) {
+        const int x = static_cast<int>(i % cw), y = static_cast<int>(i / cw);
+        const bool performer = x >= 15 && x < 25 && y >= 8 && y < 22;
+        alpha[i] = performer ? 1.0f : 0.0f;
+        for (int c = 0; c < 3; ++c) {
+            const float truth = 0.5f + 0.005f * x;
+            seen[c * cn + i] = performer ? 0.1f : truth;
+            estimate[c * cn + i] = truth + 0.02f;  // a little off, everywhere
+        }
+    }
+    const std::vector<float> cover = light::cover_weight(alpha, nullptr, cw, ch);
+    CHECK(cover[15 * cw + 20] == 1.0f && cover[2 * cw + 2] < 1e-3f);
+    const std::vector<float> filled = light::fill_behind(seen, cover, estimate, cw, ch);
+    CHECK(std::fabs(filled[2 * cw + 2] - seen[2 * cw + 2]) < 1e-6f);  // untouched
+    const float truth_mid = 0.5f + 0.005f * 20;
+    CHECK(std::fabs(filled[15 * cw + 20] - truth_mid) < 0.02f);  // no performer left
+
+    // Photoshop's Hue/Saturation.
+    auto adjust = [](float r, float g, float b, fixes::LightCrop crop) {
+        std::vector<float> p = {r, g, b};
+        light::adjust_hue_saturation(p, 1, 1, crop);
+        return p;
+    };
+    fixes::LightCrop c;
+    c.hue = 120.0f;
+    std::vector<float> p = adjust(1, 0, 0, c);
+    CHECK(p[0] < 0.01f && p[1] > 0.99f && p[2] < 0.01f);  // red to green
+    c = {};
+    c.saturation = -100.0f;
+    p = adjust(1, 0, 0, c);
+    CHECK(std::fabs(p[0] - p[1]) < 1e-4f && std::fabs(p[1] - p[2]) < 1e-4f);  // grey
+    c = {};
+    c.lightness = 100.0f;
+    p = adjust(0.3f, 0.2f, 0.1f, c);
+    CHECK(p[0] > 0.999f && p[1] > 0.999f && p[2] > 0.999f);  // white
+    c = {};
+    c.colorize = true;
+    c.hue = 240.0f;
+    c.saturation = 100.0f;
+    p = adjust(0.5f, 0.5f, 0.5f, c);
+    CHECK(p[2] > p[0] + 0.5f && p[2] > p[1] + 0.5f);  // grey made blue
+
+    // The EXR: OpenEXR's magic number, its header, and every block.
+    std::vector<float> rgb(static_cast<std::size_t>(37) * 21 * 3);
+    for (std::size_t i = 0; i < rgb.size(); ++i) rgb[i] = static_cast<float>(i % 97) / 13.0f;  // past 1 too
+    const std::string exr = temp("photoscoping_test.exr").string();
+    CHECK(media::write_exr_half(exr, rgb, 37, 21));
+    std::FILE* f = std::fopen(exr.c_str(), "rb");
+    unsigned char head[8] = {};
+    CHECK(f && std::fread(head, 1, 8, f) == 8);
+    if (f) std::fclose(f);
+    CHECK(head[0] == 0x76 && head[1] == 0x2f && head[2] == 0x31 && head[3] == 0x01 && head[4] == 2);
+    fs::remove(exr);
+}
+
 }  // namespace
 
 int main() {
     test_png16();
     test_encoders();
     test_plate();
+    test_light_maps();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);
         return 1;

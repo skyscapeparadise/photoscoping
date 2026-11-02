@@ -28,6 +28,9 @@ namespace ps::media {
 //                 subject is. ProRes 422 and 422 LT at 10 bits, HEVC Main 10,
 //                 H.264 High at 8, the last two on the Mac's own encoder
 //
+//   light maps    RGBA, the alpha ignored, the colour sRGB-encoded and tagged
+//                 so: HEVC Main 10, ProRes 422, 422 LT and 4444, H.264, VP9
+//
 // The PNG sequence is not a video and is written elsewhere.
 class VideoEncoder {
 public:
@@ -39,8 +42,8 @@ public:
     // `rate` is the clip's, exactly: num/den frames a second.
     bool open(const std::string& path, ExportFormat format, int width, int height, int rate_num,
               int rate_den, std::string* error);
-    // width x height x 4 samples for the subject's formats, width x height
-    // for the matte's.
+    // width x height x 4 samples for the subject's and light maps' formats,
+    // width x height for the matte's.
     bool write(const std::uint16_t* samples, std::string* error);
     // Flushes the encoder and closes the file. An export not finished is a
     // file not finished.

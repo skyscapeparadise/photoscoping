@@ -1,6 +1,8 @@
 #pragma once
 
 #include <functional>
+
+#include "editor/light_controls.hpp"
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,6 +37,9 @@ public:
     void build(ui::FontCache& fonts, const gpu::IconAtlas& atlas);
 
     ToolStrip* tools() const { return tools_; }
+    LightControls* light_controls() const { return light_controls_; }
+    // The light tool's controls in the card, in place of the clip's rows.
+    void show_light_controls(bool show);
     ViewSwitch* views() const { return views_; }
     void set_clip(const ClipInfo& info);
     // The card's first line, which is the tool's name unless the tool has
@@ -67,6 +72,7 @@ private:
     ViewSwitch* views_ = nullptr;
     ui::RectNode* card_ = nullptr;
     ui::TextNode* heading_ = nullptr;
+    LightControls* light_controls_ = nullptr;
     ui::TextNode* title_ = nullptr;
     ui::RectNode* rule_ = nullptr;
     ui::TextNode* caption_ = nullptr;

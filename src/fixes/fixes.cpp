@@ -161,6 +161,40 @@ bool Fixes::remove_stroke(int id) {
     return strokes.size() != before;
 }
 
+LightCrop* Fixes::find_light(int id) {
+    for (LightCrop& l : lights)
+        if (l.id == id) return &l;
+    return nullptr;
+}
+
+const LightCrop* Fixes::find_light(int id) const {
+    for (const LightCrop& l : lights)
+        if (l.id == id) return &l;
+    return nullptr;
+}
+
+int Fixes::add_light(std::int64_t frame, std::vector<Point> corners) {
+    LightCrop l;
+    l.id = next_id++;
+    for (int n = 1;; ++n) {
+        const std::string name = "light " + std::to_string(n);
+        if (std::none_of(lights.begin(), lights.end(), [&](const LightCrop& o) { return o.name == name; })) {
+            l.name = name;
+            break;
+        }
+    }
+    l.keys.push_back(ShapeKey{frame, std::move(corners)});
+    lights.push_back(std::move(l));
+    return lights.back().id;
+}
+
+bool Fixes::remove_light(int id) {
+    const auto before = lights.size();
+    lights.erase(std::remove_if(lights.begin(), lights.end(), [&](const LightCrop& l) { return l.id == id; }),
+                 lights.end());
+    return lights.size() != before;
+}
+
 void Rematte::normalize() {
     for (ShapeKey& k : keys) {
         Point& a = k.points[0];
@@ -223,6 +257,8 @@ std::vector<std::int64_t> Fixes::key_frames() const {
         for (const ShapeKey& k : s.keys) frames.push_back(k.frame);
     for (const Rematte& r : rematte)
         for (const ShapeKey& k : r.keys) frames.push_back(k.frame);
+    for (const LightCrop& l : lights)
+        for (const ShapeKey& k : l.keys) frames.push_back(k.frame);
     std::sort(frames.begin(), frames.end());
     frames.erase(std::unique(frames.begin(), frames.end()), frames.end());
     return frames;
@@ -266,6 +302,25 @@ bool Fixes::load(const std::string& path, std::string* error) {
         rematte.push_back(std::move(box));
     }
     for (const Rematte& r : rematte) next_id = std::max(next_id, r.id + 1);
+    for (const auto& l : doc.value("lights", nlohmann::json::array())) {
+        LightCrop crop;
+        crop.id = l.value("id", 0);
+        crop.name = l.value("name", std::string());
+        crop.hue = l.value("hue", 0.0f);
+        crop.saturation = l.value("saturation", 0.0f);
+        crop.lightness = l.value("lightness", 0.0f);
+        crop.colorize = l.value("colorize", false);
+        if (!read_keys(l, 4, &crop.keys) || crop.point_count() != 4) continue;
+        if (crop.name.empty()) crop.name = "light " + std::to_string(lights.size() + 1);
+        lights.push_back(std::move(crop));
+    }
+    for (const LightCrop& l : lights) next_id = std::max(next_id, l.id + 1);
+    if (doc.contains("light_export") && doc["light_export"].is_object()) {
+        const nlohmann::json& e = doc["light_export"];
+        light_export.linear = e.value("linear", true);
+        light_export.fill_shadows = e.value("fill_shadows", false);
+        light_export.size = std::max(0, e.value("size", 0));
+    }
     if (doc.contains("plate") && doc["plate"].is_object()) {
         const nlohmann::json& p = doc["plate"];
         plate.first = p.value("first", std::int64_t{-1});
@@ -301,6 +356,20 @@ bool Fixes::save(const std::string& path, std::string* error) const {
     for (const Rematte& r : rematte)
         rematte_json.push_back({{"id", r.id}, {"keys", write_keys(r.keys)}});
     doc["rematte"] = rematte_json;
+    nlohmann::json lights_json = nlohmann::json::array();
+    for (const LightCrop& l : lights)
+        lights_json.push_back({{"id", l.id},
+                               {"name", l.name},
+                               {"hue", l.hue},
+                               {"saturation", l.saturation},
+                               {"lightness", l.lightness},
+                               {"colorize", l.colorize},
+                               {"keys", write_keys(l.keys)}});
+    doc["lights"] = lights_json;
+    if (!(light_export == LightExport{}))
+        doc["light_export"] = {{"linear", light_export.linear},
+                               {"fill_shadows", light_export.fill_shadows},
+                               {"size", light_export.size}};
     if (plate.set())
         doc["plate"] = {{"first", plate.first}, {"last", plate.last}, {"correct", plate.correct}};
 

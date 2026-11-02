@@ -113,6 +113,34 @@ wall is beyond it either way -- for those, paint. It stands down on frames too
 far out of focus for the wall's grain to show, and on close-ups with no open
 wall.
 
+Light maps are the backdrop read as a lighting record: crops of it, exported
+frame by frame to drive emissive lights in Blender. The light tool draws
+them: drag on the backdrop for a crop square to the frame, then pull its
+corners onto the board -- an angled board is straightened on export -- or
+drag inside to move it. Like a garbage matte a crop holds its place, and
+keys on the frame it is changed on; K keys it, Backspace and Shift-Backspace
+delete. The card shows the selected crop's Hue, Saturation and Lightness, with
+Colorize, as Photoshop has them (drag, or double-click to reset), and the size
+it will come out at. File > Export Light Maps writes every crop at once into a
+chosen folder -- "clip light 1.mp4" and so on, each with a JSON sidecar -- as
+HEVC, ProRes 422, 422 LT or 4444, H.264, VP9, or PNG or EXR sequences. Its
+settings: Linear Light (the default) or Graded Look; Fill the Performer's
+Shadow; Size: the crop's own, a preset or a custom long side.
+
+Where the performer passes in front of a crop, the backdrop behind them is
+filled in: a smooth surface fitted to the backdrop around the crop (with a
+clean plate, the plate under the frame's own light), matched to the real
+backdrop at the edge and blended in by the matte's softness, so a light driven
+by it eases rather than steps as they cross. Linear light in a video or PNG
+is scaled by one exposure for every crop and frame -- found by a first pass --
+so the brightest light sits just under white; the sidecar's
+`emission_strength` restores it in Blender. EXR keeps the light as it is,
+unclipped. Their shadow is kept by default, since it is light that did not
+reach the backdrop; filling it works well with a clean plate, and less
+reliably without one, and assumes the light across the backdrop only changes
+smoothly -- a moving spot or a projection can be mistaken for shadow.
+`--light-maps DIR --light-format ID --mattes DIR` runs it headless.
+
 File > Export Subject writes the matted subject with its alpha: ProRes 4444
 (Command-E, the default), VP9 in WebM, or a folder of 16-bit RGBA PNGs. File >
 Export Matte writes the matte alone, white on black: ProRes 422, ProRes 422
