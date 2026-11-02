@@ -264,6 +264,7 @@ void EditorApp::destroy() {
     // the tree goes first.
     root_.clear_children();
     job_.stop();
+    server_.stop();
     clip_.close();
     frames_.destroy();
     patches_.destroy();
@@ -295,6 +296,7 @@ bool EditorApp::open_clip(const std::string& path, std::int64_t frame) {
     // A run belongs to the clip it was started for; its finished frames stay
     // on disk, and resume when that clip is open again.
     job_.stop();
+    server_.stop();
     matte_.destroy();
     subject_.destroy();
     frames_.destroy();
@@ -401,6 +403,7 @@ void EditorApp::show_open_dialog() {
 
 bool EditorApp::can_matte_frame() const {
     if (!clip_.is_open() || !job_.available() || job_.running() || shown_ < 0) return false;
+    if (server_.asked(shown_)) return false;
     // Nothing to do on a frame already matted -- and refined, with a plate.
     const bool refined = !fixes_.plate.set() ||
                          (shown_ < static_cast<std::int64_t>(frames_.refined().size()) &&
@@ -410,16 +413,45 @@ bool EditorApp::can_matte_frame() const {
 
 void EditorApp::matte_frame() {
     if (!can_matte_frame()) return;
-    const std::string range = std::to_string(shown_) + ":" + std::to_string(shown_);
-    if (job_.start(MatteJob::Kind::kMatte, clip_.path(), options_.lut_path, options_.render_dir,
-                   clip_name_, {}, {}, range)) {
-        job_started_ns_ = SDL_GetTicksNS();
-        done_at_start_ = frames_.done_count();
-        refined_at_start_ = frames_.refined_count();
-        matting_frame_ = shown_;
-        set_playing(false);
-    }
+    // The process is started on the first frame asked for, and kept: the
+    // models' warm-up is paid once, not for every frame.
+    if (!server_.running() &&
+        !server_.start(job_.app_path(), job_.models_path(), clip_.path(), options_.lut_path,
+                       options_.render_dir, clip_name_))
+        return;
+    server_.request(shown_);
+    set_playing(false);
     refresh_matte_ui();
+}
+
+void EditorApp::make_way() { server_.stop(); }
+
+void EditorApp::poll_server() {
+    if (!server_.running()) return;
+    bool died = false;
+    const std::vector<std::int64_t> finished = server_.poll(&died);
+    if (!finished.empty()) {
+        frames_.rescan();
+        choose_matte_source();
+        ++subject_version_;
+        for (const std::int64_t f : finished) {
+            if (f != shown_ || !frames_.matted(f)) continue;
+            // The frame on show, matted: fetched now, in a view that shows
+            // it, so the feedback asked for is there to see.
+            frames_.refresh();
+            if (view_ == editor::View::kFootage) {
+                refresh_matte_ui();  // the views become available first
+                root_.inspector()->views()->set_view(editor::View::kOverlay);
+            }
+        }
+    }
+    // Ten minutes with nothing asked of it, and its memory is worth more
+    // than its warmth.
+    if (server_.running() && !server_.busy() && server_.idle_seconds() > 600.0) {
+        SDL_Log("the matting process has been idle ten minutes; stopping it");
+        server_.stop();
+    }
+    if (!finished.empty() || died) refresh_matte_ui();
 }
 
 bool EditorApp::can_export_lights() const {
@@ -530,6 +562,7 @@ void EditorApp::start_plate_job() {
         return;
     }
     plate_wanted_ = false;
+    make_way();
     if (job_.start(MatteJob::Kind::kPlate, clip_.path(), options_.lut_path, options_.render_dir,
                    clip_name_))
         job_started_ns_ = SDL_GetTicksNS();
@@ -603,6 +636,7 @@ void EditorApp::start_export(const std::string& chosen, int format_index) {
     const media::ExportFormatInfo& info = media::kExportFormats[format_index];
     if (info.kind == media::ExportKind::kLight) {
         if (!can_export_lights()) return;
+        make_way();
         if (job_.start(MatteJob::Kind::kLights, clip_.path(), options_.lut_path, options_.render_dir,
                        clip_name_, chosen, info.id)) {
             job_started_ns_ = SDL_GetTicksNS();
@@ -630,6 +664,7 @@ void EditorApp::start_export(const std::string& chosen, int format_index) {
             return;
         }
     }
+    make_way();
     if (job_.start(MatteJob::Kind::kExport, clip_.path(), options_.lut_path, options_.render_dir,
                    clip_name_, path.string(), info.id)) {
         job_started_ns_ = SDL_GetTicksNS();
@@ -714,8 +749,10 @@ void EditorApp::refresh_matte_ui() {
     frames_.set_keep_coverage(wants_coverage());
 
     std::string row = "none";
-    if (job_.running() && matting_frame_ >= 0) {
-        row = "matting frame " + std::to_string(matting_frame_);
+    if (server_.busy()) {
+        row = (server_.ready() ? "matting frame " : "warming up \xC2\xB7 frame ") +
+              std::to_string(server_.current());
+        if (server_.waiting() > 0) row += " \xC2\xB7 " + std::to_string(server_.waiting()) + " waiting";
     } else if (job_.running() && job_.kind() == MatteJob::Kind::kMatte && !complete) {
         row = std::to_string(done) + " of " + std::to_string(total);
         const double elapsed = (SDL_GetTicksNS() - job_started_ns_) / 1e9;
@@ -787,7 +824,9 @@ void EditorApp::refresh_matte_ui() {
     const bool refine_wanted = plate.set() && complete && refined < total;
 
     const std::size_t to_make = patches_.frames_to_make();
-    if (exporting) {
+    if (server_.busy()) {
+        inspector->set_action("stop matting", true);
+    } else if (exporting) {
         // The share done on the pill too: the card's rows are hidden while
         // the light tool's controls are in their place.
         std::string label = "stop exporting";
@@ -825,12 +864,18 @@ void EditorApp::refresh_matte_ui() {
 }
 
 void EditorApp::toggle_job() {
+    // Single frames being matted: the pill stops them.
+    if (server_.busy()) {
+        server_.stop();
+        refresh_matte_ui();
+        return;
+    }
+    if (!job_.running()) make_way();
     if (job_.running()) {
         // A stopped export leaves its .partial behind, never the file itself.
         if (job_.kind() == MatteJob::Kind::kExport || job_.kind() == MatteJob::Kind::kLights)
             export_status_ = "stopped";
         job_.stop();
-        matting_frame_ = -1;
     } else if (clip_.is_open() && root_.tool() == editor::Tool::kRematte) {
         if (job_.start(MatteJob::Kind::kRematte, clip_.path(), options_.lut_path,
                        options_.render_dir, clip_name_)) {
@@ -884,21 +929,6 @@ void EditorApp::poll_job() {
         // Finished, the new videos are in place and newer than the frames.
         choose_matte_source();
         if (plating) ++subject_version_;
-        // A one-frame run: its frame is on show, in a view that shows the
-        // matte, so the feedback it was asked for is there to see.
-        if (matting_frame_ >= 0) {
-            frames_.rescan();
-            choose_matte_source();
-            if (frames_.matted(matting_frame_)) {
-                target_ = matting_frame_;
-                frames_.refresh();
-                if (view_ == editor::View::kFootage) {
-                    refresh_matte_ui();  // the views become available first
-                    root_.inspector()->views()->set_view(editor::View::kOverlay);
-                }
-            }
-            matting_frame_ = -1;
-        }
         // A plate asked for while this ran is made now -- once: a plate run
         // that failed is not retried until the plate changes again.
         if (!plating && plate_wanted_) start_plate_job();
@@ -1386,6 +1416,7 @@ void EditorApp::tracking_tick(void* self) {
     auto* app = static_cast<EditorApp*>(self);
     if (!app->running_) return;
     app->poll_job();
+    app->poll_server();
     app->render();
 }
 
@@ -1410,9 +1441,10 @@ void EditorApp::run() {
             got = SDL_PollEvent(&event);
         } else if (churning()) {
             got = SDL_WaitEventTimeout(&event, kChurnIntervalMs);
-        } else if (job_.running()) {
-            // Often enough to see each frame arrive.
-            got = SDL_WaitEventTimeout(&event, 1000);
+        } else if (job_.running() || server_.running()) {
+            // Often enough to see each frame arrive -- and, with the matting
+            // process idle, to notice when it has been so long enough.
+            got = SDL_WaitEventTimeout(&event, server_.busy() ? 250 : 1000);
         } else {
             got = SDL_WaitEvent(&event);
         }
@@ -1422,6 +1454,7 @@ void EditorApp::run() {
         }
         install_menu();
         poll_job();
+        poll_server();
         if (!running_ || !render()) break;
     }
 #if defined(SDL_PLATFORM_APPLE)

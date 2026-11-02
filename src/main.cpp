@@ -39,6 +39,7 @@ struct Options {
     std::string matte_clip;
     std::string rematte_clip;
     std::string plate_clip;
+    std::string matte_serve;
     std::string light_maps;
     ps::media::ExportFormat light_format = ps::media::ExportFormat::kLightHevc;
     std::string export_path_out;
@@ -89,6 +90,10 @@ void usage() {
         "                 a folder of 16-bit RGBA frames)\n"
         "  --export-range A:B\n"
         "                 only frames A to B, inclusive\n"
+        "  --matte-serve DIR\n"
+        "                 stay running, models loaded and warm, and matte the frames\n"
+        "                 asked for on stdin -- \"matte N\" -- into DIR as --matte-clip\n"
+        "                 does, answering \"done N\" on stdout; \"quit\" ends it\n"
         "  --plate-clip DIR\n"
         "                 make the clean plate the clip's fixes in DIR name\n"
         "  --light-maps DIR\n"
@@ -162,6 +167,10 @@ std::optional<Options> parse_args(int argc, char** argv) {
             if (!v || !ps::media::parse_export_format(v, &o.light_format) ||
                 ps::media::export_format_info(o.light_format).kind != ps::media::ExportKind::kLight)
                 return std::nullopt;
+        } else if (a == "--matte-serve") {
+            const char* v = value();
+            if (!v) return std::nullopt;
+            o.matte_serve = v;
         } else if (a == "--plate-clip") {
             const char* v = value();
             if (!v) return std::nullopt;
@@ -217,7 +226,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
     if (!o.export_path.empty()) o.probe = true;
     if ((o.probe || o.bench || o.pipe || !o.matte.empty() || !o.matte_clip.empty() ||
          !o.rematte_clip.empty() || !o.export_path_out.empty() || !o.plate_clip.empty() ||
-         !o.light_maps.empty()) &&
+         !o.light_maps.empty() || !o.matte_serve.empty()) &&
         o.clip.empty())
         return std::nullopt;
     return o;
@@ -566,6 +575,139 @@ bool run_matte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestP
     return done >= count;
 }
 
+// Matting on request, for the app's Matte This Frame: the models loaded and
+// warmed once -- the minutes of a machine's first Core ML compile, the
+// seconds of every first inference after -- and then each frame asked for on
+// stdin matted exactly as --matte-clip would, into the same folders. stdout
+// carries only the conversation: "ready" once warm, then "done N" or
+// "error N why" for each request; progress and errors go to stderr, for the
+// log. Ends at "quit" or when stdin closes.
+bool run_matte_serve(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestPass& ingest,
+                     ps::media::VideoDecoder& decoder, const ps::gpu::InputTransform& transform) {
+    namespace fs = std::filesystem;
+    const std::string stem = fs::path(o.clip).stem().string();
+    const fs::path dir(o.matte_serve);
+    const fs::path out = dir / (stem + "_mattes");
+    std::error_code ec;
+    fs::create_directories(out, ec);
+    std::string error;
+
+    const Uint64 load_start = SDL_GetTicksNS();
+    ps::matting::MattingStack stack;
+    const auto backend =
+        o.model_cpu ? ps::matting::MatteModel::Backend::kCpu : ps::matting::MatteModel::Backend::kGpu;
+    if (!stack.load(o.models, backend, ps::matting::default_cache_dir(), &error)) {
+        std::fprintf(stderr, "cannot load the models in %s: %s\n", o.models.c_str(), error.c_str());
+        return false;
+    }
+    // Warmed on a small grey frame: both models run once, so the first frame
+    // asked for does not pay for it.
+    {
+        ps::matting::MattingFrame dummy;
+        dummy.width = 256;
+        dummy.height = 144;
+        dummy.planes.assign(static_cast<std::size_t>(256) * 144 * 3, 0.5f);
+        dummy.linear.assign(dummy.planes.size(), 0.2f);
+        std::vector<float> a = stack.coarse(dummy, &error);
+        if (!a.empty()) a = stack.tiled(dummy, a, &error);
+    }
+    std::fprintf(stderr, "models loaded and warm in %.1f s\n", (SDL_GetTicksNS() - load_start) / 1e9);
+    std::printf("ready\n");
+    std::fflush(stdout);
+
+    auto frame_png = [](const fs::path& d, std::int64_t i) {
+        char name[32];
+        std::snprintf(name, sizeof name, "%06lld.png", static_cast<long long>(i));
+        return d / name;
+    };
+    auto write = [&](const fs::path& path, const std::vector<float>& alpha, int w, int h) {
+        fs::path partial = path;
+        partial.replace_extension(".partial.png");
+        if (!ps::matting::write_png16(partial.string(), alpha, w, h)) return false;
+        fs::rename(partial, path, ec);
+        return !ec;
+    };
+
+    ps::matting::PlateImage plate;
+    std::string plate_name;
+    std::string line;
+    char buffer[256];
+    while (std::fgets(buffer, sizeof buffer, stdin)) {
+        line = buffer;
+        if (line.rfind("quit", 0) == 0) break;
+        long long requested = -1;
+        if (std::sscanf(line.c_str(), "matte %lld", &requested) != 1) continue;
+        const std::int64_t i = requested;
+        auto fail = [&](const std::string& why) {
+            std::fprintf(stderr, "frame %lld: %s\n", static_cast<long long>(i), why.c_str());
+            std::printf("error %lld %s\n", static_cast<long long>(i), why.c_str());
+            std::fflush(stdout);
+        };
+        const Uint64 t = SDL_GetTicksNS();
+
+        // The fixes read afresh each time: the plate may have changed.
+        ps::fixes::Fixes fixes;
+        if (!fixes.load((dir / (stem + "_fixes.json")).string(), &error)) {
+            fail("cannot read the fixes");
+            continue;
+        }
+        const bool with_plate = fixes.plate.set();
+        const fs::path plate_out =
+            with_plate ? dir / ps::fixes::plate_mattes_name(stem, fixes.plate) : fs::path();
+        if (with_plate && ps::fixes::plate_image_name(stem, fixes.plate) != plate_name) {
+            if (!ps::exporting::obtain_plate(o.matte_serve, stem, fixes.plate, gpu, ingest, decoder,
+                                             transform, &plate, &error)) {
+                fail("cannot make the clean plate: " + error);
+                continue;
+            }
+            plate_name = ps::fixes::plate_image_name(stem, fixes.plate);
+        }
+        if (with_plate) fs::create_directories(plate_out, ec);
+        const bool base_needed = !fs::exists(frame_png(out, i), ec);
+        const bool plate_needed = with_plate && !fs::exists(frame_png(plate_out, i), ec);
+        if (base_needed || plate_needed) {
+            if (i < 0 || i >= decoder.frame_count() || !decoder.seek_frame(i)) {
+                fail("no such frame");
+                continue;
+            }
+            SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
+            const bool ingested = ingest.process(cmd, decoder, transform);
+            SDL_SubmitGPUCommandBuffer(cmd);
+            if (!ingested) {
+                fail("cannot read the frame");
+                continue;
+            }
+            const ps::matting::MattingFrame frame = ps::matting::prepare_frame(
+                ingest.read_working(), static_cast<int>(ingest.width()), static_cast<int>(ingest.height()));
+            std::vector<float> alpha;
+            if (base_needed) {
+                alpha = stack.coarse(frame, &error);
+                if (!alpha.empty()) alpha = stack.tiled(frame, alpha, &error);
+                if (!alpha.empty()) alpha = ps::matting::MattingStack::band(frame, alpha, &error);
+                if (alpha.empty() || !write(frame_png(out, i), alpha, frame.width, frame.height)) {
+                    fail(alpha.empty() ? error : "cannot write the matte");
+                    continue;
+                }
+            } else {
+                alpha = ps::exporting::read_matte(o.matte_serve, stem, i, frame.width, frame.height);
+            }
+            if (plate_needed) {
+                const std::vector<float> refined =
+                    ps::exporting::plate_pass(frame, alpha, plate, fixes.plate.correct, &error);
+                if (refined.empty() || !write(frame_png(plate_out, i), refined, frame.width, frame.height)) {
+                    fail(refined.empty() ? error : "cannot write the refined matte");
+                    continue;
+                }
+            }
+        }
+        std::fprintf(stderr, "frame %lld matted in %.1f s\n", static_cast<long long>(i),
+                     (SDL_GetTicksNS() - t) / 1e9);
+        std::printf("done %lld\n", static_cast<long long>(i));
+        std::fflush(stdout);
+    }
+    return true;
+}
+
 // The clip's clean plate on its own, as the app's plate job: made from the
 // frames its fixes name, so the editor has it to show and to estimate with.
 bool run_plate_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestPass& ingest,
@@ -759,7 +901,7 @@ int main(int argc, char** argv) {
         options->probe || options->bench || options->pipe || !options->matte.empty() ||
         !options->matte_clip.empty() || !options->rematte_clip.empty() ||
         !options->export_path_out.empty() || !options->plate_clip.empty() ||
-        !options->light_maps.empty();
+        !options->light_maps.empty() || !options->matte_serve.empty();
     ps::media::VideoDecoder decoder;
     if (headless) {
         if (!decoder.open(options->clip, !options->software)) return 1;
@@ -797,11 +939,21 @@ int main(int argc, char** argv) {
     ps::gpu::InputTransform transform;
     if (headless) {
         transform = ps::gpu::transform_for(decoder.signal(), lut ? &*lut : nullptr);
-        describe(decoder, transform, lut, options->pipe ? stderr : stdout);
+        // Only the conversation on stdout, when it is one.
+        describe(decoder, transform, lut,
+                 options->pipe || !options->matte_serve.empty() ? stderr : stdout);
     }
 
     if (!options->matte_clip.empty()) {
         const int status = run_matte_clip(*options, gpu, ingest, decoder, transform) ? 0 : 1;
+        ingest.destroy();
+        gpu.destroy();
+        SDL_Quit();
+        return status;
+    }
+
+    if (!options->matte_serve.empty()) {
+        const int status = run_matte_serve(*options, gpu, ingest, decoder, transform) ? 0 : 1;
         ingest.destroy();
         gpu.destroy();
         SDL_Quit();

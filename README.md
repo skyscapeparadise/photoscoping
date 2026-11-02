@@ -164,8 +164,12 @@ Clip > Matte This Frame (M) mattes just the frame on screen, in the
 background, to see how the matte comes out before committing to the whole
 clip -- and refines it with the clean plate, if one is set. Once it is done the
 view switches to show it, and the frame counts as matted: the pill then offers
-to matte the rest. A frame alone pays the model's warm-up, so it takes longer
-than a frame in a run: about 25 seconds at 4K.
+to matte the rest. Frames asked for one after another queue, and the card
+counts them. They are matted by a process of the app's own that loads the
+models and warms them once, on the first, and is kept: after that a 4K frame
+takes about 10 seconds. It is stopped when the clip changes, when a full run,
+export or plate wants the GPU, by the pill, and after ten idle minutes.
+`--matte-serve DIR` is that process, for use from a script.
 
 The viewer shows a matte four ways: the footage, the matte, the matted subject
 over a checkerboard, or the footage washed purple wherever the matte drops it.

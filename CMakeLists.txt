@@ -221,6 +221,7 @@ add_executable(photoscoping src/main.cpp src/app/editor_app.cpp src/app/lockstep
                             src/app/matte_frames.cpp src/app/matte_job.cpp
                             src/app/clip_frames.cpp src/app/mask_texture.cpp
                             src/app/rematte_patches.cpp src/app/subject_estimate.cpp src/app/light_preview.cpp
+                            src/app/matte_server.cpp
                             src/export/clip_export.cpp src/export/light_export.cpp
                             src/light/light_map.cpp)
 target_link_libraries(photoscoping PRIVATE photoscoping_ui photoscoping_matting photoscoping_fixes)

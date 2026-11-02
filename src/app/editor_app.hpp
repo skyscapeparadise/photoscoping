@@ -11,6 +11,7 @@
 #include "app/mask_texture.hpp"
 #include "app/matte_frames.hpp"
 #include "app/matte_job.hpp"
+#include "app/matte_server.hpp"
 #include "app/rematte_patches.hpp"
 #include "app/subject_estimate.hpp"
 #include "app/light_preview.hpp"
@@ -100,6 +101,10 @@ private:
     // Clip > Matte This Frame: the frame on screen alone, in the background.
     bool can_matte_frame() const;
     void matte_frame();
+    // What the matting process has finished; and its idle timeout.
+    void poll_server();
+    // Before a run that wants the GPU to itself: the matting process goes.
+    void make_way();
     // Clip > the clean plate: marks its frames at the playhead, clears it,
     // or turns its override on and off (PlateAction).
     void plate_action(int action);
@@ -210,8 +215,8 @@ private:
     std::int64_t refined_at_start_ = 0;
     // The plate wants making, and waits for the run that is going to end.
     bool plate_wanted_ = false;
-    // The frame a one-frame run is matting, or -1.
-    std::int64_t matting_frame_ = -1;
+    // Single frames, matted by a process kept warm between them.
+    MatteServer server_;
     Uint64 last_poll_ns_ = 0;
     editor::View view_ = editor::View::kFootage;
 

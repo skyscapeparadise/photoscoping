@@ -30,6 +30,9 @@ public:
     // Finds this executable and the models. Call once.
     void locate();
     bool available() const { return !app_.empty() && !models_.empty(); }
+    // This executable and the models, found by locate().
+    const std::string& app_path() const { return app_; }
+    const std::string& models_path() const { return models_; }
 
     // What a run makes: the whole clip's mattes (--matte-clip), the patches
     // its re-matte boxes want (--rematte-clip), an export of it
