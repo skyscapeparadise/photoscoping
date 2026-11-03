@@ -925,6 +925,10 @@ int main(int argc, char** argv) {
         }
     }
 
+    // SDL turns a stop request into a quit event, which only a window's loop
+    // reads; a headless run would never see it. Without SDL's handlers, kill
+    // and Ctrl-C stop it as they stop any command.
+    if (headless) SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;
