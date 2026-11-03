@@ -1,4 +1,5 @@
 #include "matting/preprocess.hpp"
+#include "matting/parallel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -61,15 +62,17 @@ MattingFrame prepare_frame(const std::vector<float>& rgba, int width, int height
     const std::size_t pixels = static_cast<std::size_t>(width) * height;
     frame.planes.resize(pixels * 3);
     frame.linear.resize(pixels * 3);
-    for (std::size_t i = 0; i < pixels; ++i) {
-        const float* p = &rgba[i * 4];
-        for (int c = 0; c < 3; ++c) {
-            const float l = k2020To709[c][0] * p[0] + k2020To709[c][1] * p[1] +
-                            k2020To709[c][2] * p[2];
-            frame.linear[c * pixels + i] = l;
-            frame.planes[c * pixels + i] = srgb_encode(l);
+    parallel_for(pixels, [&](std::size_t i0, std::size_t i1) {
+        for (std::size_t i = i0; i < i1; ++i) {
+            const float* p = &rgba[i * 4];
+            for (int c = 0; c < 3; ++c) {
+                const float l = k2020To709[c][0] * p[0] + k2020To709[c][1] * p[1] +
+                                k2020To709[c][2] * p[2];
+                frame.linear[c * pixels + i] = l;
+                frame.planes[c * pixels + i] = srgb_encode(l);
+            }
         }
-    }
+    }, 1 << 14);
     return frame;
 }
 

@@ -9,6 +9,7 @@
 
 #include "light/light_map.hpp"
 #include "matting/foreground.hpp"
+#include "matting/image_ops.hpp"
 #include "media/exr_writer.hpp"
 #include "matting/plate.hpp"
 #include "matting/png16.hpp"
@@ -321,9 +322,60 @@ void test_light_maps() {
     fs::remove(exr);
 }
 
+// The blur against a direct, exact Gaussian: the same when narrow, within a
+// couple of percent when wide (box passes), on noise with a hard edge in it.
+std::vector<float> reference_blur(const std::vector<float>& src, int w, int h, float sigma) {
+    const int r = static_cast<int>(4.0 * sigma + 0.5);
+    std::vector<double> k(2 * r + 1);
+    double sum = 0;
+    for (int i = -r; i <= r; ++i) sum += k[i + r] = std::exp(-0.5 * i * i / (double(sigma) * sigma));
+    for (double& v : k) v /= sum;
+    auto mirror = [](int i, int n) {
+        const int p = 2 * n;
+        i %= p;
+        if (i < 0) i += p;
+        return i < n ? i : p - 1 - i;
+    };
+    std::vector<float> mid(src.size()), out(src.size());
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            double a = 0;
+            for (int i = -r; i <= r; ++i) a += k[i + r] * src[mirror(y + i, h) * w + x];
+            mid[y * w + x] = float(a);
+        }
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            double a = 0;
+            for (int i = -r; i <= r; ++i) a += k[i + r] * mid[y * w + mirror(x + i, w)];
+            out[y * w + x] = float(a);
+        }
+    return out;
+}
+
+void test_blur() {
+    const int w = 301, h = 203;
+    std::vector<float> img(w * h);
+    unsigned seed = 7;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            seed = seed * 1664525u + 1013904223u;
+            img[y * w + x] = (x > w / 3 ? 0.8f : 0.1f) + 0.2f * float(seed >> 8) / float(1u << 24);
+        }
+    for (float sigma : {0.7f, 1.5f, 2.5f, 3.0f, 8.0f, 24.0f, 60.0f}) {
+        const std::vector<float> fast = ps::matting::gaussian_blur(img, w, h, sigma);
+        const std::vector<float> ref = reference_blur(img, w, h, sigma);
+        float worst = 0;
+        for (std::size_t i = 0; i < img.size(); ++i) worst = std::max(worst, std::abs(fast[i] - ref[i]));
+        if (sigma < 3.0f) CHECK(worst < 1e-5f);
+        else CHECK(worst < 0.02f);
+        if (worst >= (sigma < 3.0f ? 1e-5f : 0.02f)) std::printf("  blur sigma %.1f: worst %.5f\n", sigma, worst);
+    }
+}
+
 }  // namespace
 
 int main() {
+    test_blur();
     test_png16();
     test_encoders();
     test_plate();

@@ -126,15 +126,19 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
     // Each frame two ways: as the LUT shows it, which the matte is made from
     // (and the look), and as scene light, for linear light.
     std::vector<float> scene_light;  // planar linear Rec.709, the frame read last
-    auto read_frame = [&](std::int64_t f, bool seek) -> std::unique_ptr<matting::MattingFrame> {
+    // Measuring linear light needs only the scene light, not the look.
+    auto read_frame = [&](std::int64_t f, bool seek,
+                          bool look = true) -> std::unique_ptr<matting::MattingFrame> {
         if (seek ? !decoder.seek_frame(f) : !decoder.read_next()) return nullptr;
         SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
         bool ingested = ingest.process(cmd, decoder, transform);
         if (ingested && settings.linear) ingested = ingest.process_again(cmd, request.scene);
         SDL_SubmitGPUCommandBuffer(cmd);
         if (!ingested) return nullptr;
-        auto frame = std::make_unique<matting::MattingFrame>(matting::prepare_frame(
-            ingest.read_working(), static_cast<int>(ingest.width()), static_cast<int>(ingest.height())));
+        auto frame = std::make_unique<matting::MattingFrame>();
+        if (look || !settings.linear)
+            *frame = matting::prepare_frame(ingest.read_working(), static_cast<int>(ingest.width()),
+                                            static_cast<int>(ingest.height()));
         if (settings.linear)
             scene_light = matting::prepare_frame(ingest.read_scene(), static_cast<int>(ingest.width()),
                                                  static_cast<int>(ingest.height()))
@@ -153,7 +157,7 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
         float peak = 0.0f;
         for (std::int64_t f = first; f <= last; ++f) {
             const Uint64 t = SDL_GetTicksNS();
-            const auto frame = read_frame(f, f == first);
+            const auto frame = read_frame(f, f == first, /*look=*/false);
             if (!frame) {
                 std::fprintf(stderr, "cannot decode frame %lld\n", static_cast<long long>(f));
                 return false;

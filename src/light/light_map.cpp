@@ -1,4 +1,5 @@
 #include "light/light_map.hpp"
+#include "matting/parallel.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -129,7 +130,8 @@ std::vector<float> warp(const std::vector<float>& planes, int channels, int fw, 
     const double spread = std::max(std::hypot(x1 - x0, y1 - y0), std::hypot(x2 - x0, y2 - y0));
     const int k = std::clamp(static_cast<int>(std::ceil(spread)), 1, 4);
     const float weight = 1.0f / static_cast<float>(k * k);
-    for (int v = 0; v < height; ++v)
+    matting::parallel_for(static_cast<std::size_t>(height), [&](std::size_t v0, std::size_t v1) {
+    for (int v = static_cast<int>(v0); v < static_cast<int>(v1); ++v)
         for (int u = 0; u < width; ++u) {
             const std::size_t o = static_cast<std::size_t>(v) * width + u;
             for (int sy = 0; sy < k; ++sy)
@@ -153,6 +155,7 @@ std::vector<float> warp(const std::vector<float>& planes, int channels, int fw, 
                     }
                 }
         }
+    }, 4);
     return out;
 }
 
@@ -412,13 +415,17 @@ FrameLight prepare_frame_light(const std::vector<float>& linear, const std::vect
     f.fill_shadows = fill_shadows;
     const std::size_t n = static_cast<std::size_t>(width) * height;
     std::vector<std::uint8_t> subject(n);
-    for (std::size_t i = 0; i < n; ++i) subject[i] = alpha[i] >= 0.002f;
+    matting::parallel_for(n, [&](std::size_t i0, std::size_t i1) {
+        for (std::size_t i = i0; i < i1; ++i) subject[i] = alpha[i] >= 0.002f;
+    }, 1 << 16);
     const int margin = fill_shadows ? std::max(48, width / 40) : 8;
     f.not_wall = matting::dilate_cross(subject, width, height, margin);
     if (plate && plate->size() == n * 3) {
         f.plate = plate;
         f.ratio.resize(n * 3);
-        for (std::size_t i = 0; i < n * 3; ++i) f.ratio[i] = linear[i] / std::max((*plate)[i], 1e-3f);
+        matting::parallel_for(n * 3, [&](std::size_t i0, std::size_t i1) {
+            for (std::size_t i = i0; i < i1; ++i) f.ratio[i] = linear[i] / std::max((*plate)[i], 1e-3f);
+        }, 1 << 16);
     }
     return f;
 }

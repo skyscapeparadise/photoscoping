@@ -1,4 +1,5 @@
 #include "matting/image_ops.hpp"
+#include "matting/parallel.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -65,8 +66,97 @@ std::vector<std::uint8_t> dilate_cross(const std::vector<std::uint8_t>& mask, in
     return out;
 }
 
+namespace {
+
+// Index i folded back into [0, n) by mirroring at the edges -- d c b a | a b c
+// d | d c b a -- as many times as it takes.
+inline int mirror(int i, int n) {
+    const int period = 2 * n;
+    i %= period;
+    if (i < 0) i += period;
+    return i < n ? i : period - 1 - i;
+}
+
+// The widths of three box blurs that together make a Gaussian of sigma
+// (Kovesi's "boxes for Gauss"): odd widths, the first m of them one size, the
+// rest the next odd size up, so the variance comes out right.
+void gauss_boxes(float sigma, int radii[3]) {
+    constexpr int n = 3;
+    const double s2 = static_cast<double>(sigma) * sigma;
+    int wl = static_cast<int>(std::floor(std::sqrt(12.0 * s2 / n + 1.0)));
+    if (wl % 2 == 0) --wl;
+    const int wu = wl + 2;
+    const int m = static_cast<int>(
+        std::lround((12.0 * s2 - n * wl * wl - 4.0 * n * wl - 3.0 * n) / (-4.0 * wl - 4.0)));
+    const int small = std::clamp(m, 0, n);
+    for (int i = 0; i < n; ++i) radii[i] = ((i < small ? wl : wu) - 1) / 2;
+}
+
+// One box blur of radius r along the rows, src to dst, mirrored at the ends.
+void box_rows(const float* src, float* dst, int width, int height, int r) {
+    const double inv = 1.0 / (2 * r + 1);
+    parallel_for(static_cast<std::size_t>(height), [&](std::size_t y0, std::size_t y1) {
+        for (std::size_t y = y0; y < y1; ++y) {
+            const float* row = src + y * width;
+            float* out = dst + y * width;
+            double sum = 0.0;
+            for (int k = -r; k <= r; ++k) sum += row[mirror(k, width)];
+            for (int x = 0; x < width; ++x) {
+                out[x] = static_cast<float>(sum * inv);
+                sum += row[mirror(x + r + 1, width)] - row[mirror(x - r, width)];
+            }
+        }
+    }, 8);
+}
+
+// The same down the columns, a strip of columns at a time so rows are read
+// in order.
+void box_columns(const float* src, float* dst, int width, int height, int r) {
+    constexpr int kStrip = 64;
+    const double inv = 1.0 / (2 * r + 1);
+    const std::size_t strips = (static_cast<std::size_t>(width) + kStrip - 1) / kStrip;
+    parallel_for(strips, [&](std::size_t s0, std::size_t s1) {
+        std::vector<double> sum(kStrip);
+        for (std::size_t s = s0; s < s1; ++s) {
+            const int x0 = static_cast<int>(s) * kStrip, x1 = std::min(width, x0 + kStrip);
+            const int n = x1 - x0;
+            std::fill(sum.begin(), sum.begin() + n, 0.0);
+            for (int k = -r; k <= r; ++k) {
+                const float* row = src + static_cast<std::size_t>(mirror(k, height)) * width + x0;
+                for (int x = 0; x < n; ++x) sum[x] += row[x];
+            }
+            for (int y = 0; y < height; ++y) {
+                float* out = dst + static_cast<std::size_t>(y) * width + x0;
+                for (int x = 0; x < n; ++x) out[x] = static_cast<float>(sum[x] * inv);
+                const float* in = src + static_cast<std::size_t>(mirror(y + r + 1, height)) * width + x0;
+                const float* gone = src + static_cast<std::size_t>(mirror(y - r, height)) * width + x0;
+                for (int x = 0; x < n; ++x) sum[x] += in[x] - gone[x];
+            }
+        }
+    }, 1);
+}
+
+}  // namespace
+
 std::vector<float> gaussian_blur(const std::vector<float>& src, int width, int height,
                                  float sigma) {
+    if (width <= 0 || height <= 0 || sigma <= 0.0f) return src;
+
+    // Wide: three box blurs each way, whose cost does not grow with sigma --
+    // a direct kernel 4 sigma either side is hundreds of taps by then. Within
+    // a percent or two of the true Gaussian, and smooth.
+    if (sigma >= 3.0f) {
+        int radii[3];
+        gauss_boxes(sigma, radii);
+        std::vector<float> a(src), b(src.size());
+        for (int r : radii) {
+            box_columns(a.data(), b.data(), width, height, r);
+            box_rows(b.data(), a.data(), width, height, r);
+        }
+        return a;
+    }
+
+    // Narrow: the exact kernel, 4 sigma either side, as scipy makes it.
     const int radius = static_cast<int>(4.0 * sigma + 0.5);
     std::vector<double> kernel(2 * radius + 1);
     double sum = 0.0;
@@ -76,40 +166,45 @@ std::vector<float> gaussian_blur(const std::vector<float>& src, int width, int h
     }
     for (double& k : kernel) k /= sum;
 
-    auto reflect = [](int i, int n) {
-        // d c b a | a b c d | d c b a; the kernel is never wider than the
-        // image here, so one fold either way is enough.
-        if (i < 0) return -i - 1;
-        if (i >= n) return 2 * n - i - 1;
-        return i;
-    };
-
     // Down the columns, then along the rows: scipy's axis order. Summed in
-    // double, as scipy does.
-    // A whole row accumulated at a time, so the source is read in order
-    // rather than down a column.
+    // double, as scipy does. A whole row accumulated at a time, so the source
+    // is read in order rather than down a column.
     std::vector<float> mid(src.size());
-    std::vector<double> acc(width);
-    for (int y = 0; y < height; ++y) {
-        std::fill(acc.begin(), acc.end(), 0.0);
-        for (int k = -radius; k <= radius; ++k) {
-            const double w = kernel[k + radius];
-            const float* row = &src[static_cast<std::size_t>(reflect(y + k, height)) * width];
-            for (int x = 0; x < width; ++x) acc[x] += w * row[x];
+    parallel_for(static_cast<std::size_t>(height), [&](std::size_t y0, std::size_t y1) {
+        std::vector<double> acc(width);
+        for (std::size_t y = y0; y < y1; ++y) {
+            std::fill(acc.begin(), acc.end(), 0.0);
+            for (int k = -radius; k <= radius; ++k) {
+                const double w = kernel[k + radius];
+                const float* row = &src[static_cast<std::size_t>(mirror(static_cast<int>(y) + k, height)) * width];
+                for (int x = 0; x < width; ++x) acc[x] += w * row[x];
+            }
+            float* dst = &mid[y * width];
+            for (int x = 0; x < width; ++x) dst[x] = static_cast<float>(acc[x]);
         }
-        float* dst = &mid[static_cast<std::size_t>(y) * width];
-        for (int x = 0; x < width; ++x) dst[x] = static_cast<float>(acc[x]);
-    }
+    }, 8);
     std::vector<float> out(src.size());
-    for (int y = 0; y < height; ++y) {
-        const float* row = &mid[static_cast<std::size_t>(y) * width];
-        for (int x = 0; x < width; ++x) {
-            double acc = 0.0;
-            for (int k = -radius; k <= radius; ++k)
-                acc += kernel[k + radius] * row[reflect(x + k, width)];
-            out[static_cast<std::size_t>(y) * width + x] = static_cast<float>(acc);
+    parallel_for(static_cast<std::size_t>(height), [&](std::size_t y0, std::size_t y1) {
+        for (std::size_t y = y0; y < y1; ++y) {
+            const float* row = &mid[y * width];
+            float* dst = &out[y * width];
+            // The middle without folding; the ends folded.
+            const int lo = std::min(radius, width), hi = std::max(lo, width - radius);
+            auto at = [&](int x) {
+                double acc = 0.0;
+                for (int k = -radius; k <= radius; ++k) acc += kernel[k + radius] * row[mirror(x + k, width)];
+                return static_cast<float>(acc);
+            };
+            for (int x = 0; x < lo; ++x) dst[x] = at(x);
+            for (int x = lo; x < hi; ++x) {
+                double acc = 0.0;
+                const float* p = row + x - radius;
+                for (int k = 0; k <= 2 * radius; ++k) acc += kernel[k] * p[k];
+                dst[x] = static_cast<float>(acc);
+            }
+            for (int x = hi; x < width; ++x) dst[x] = at(x);
         }
-    }
+    }, 8);
     return out;
 }
 
