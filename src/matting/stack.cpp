@@ -1,4 +1,5 @@
 #include "matting/stack.hpp"
+#include "matting/parallel.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -230,6 +231,14 @@ std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vect
     }
     const float ramp = static_cast<float>(2 * pad);
     std::vector<float> acc(pixels, 0.0f), coverage(pixels, 0.0f);
+
+    // The cells to solve, each with its padded region.
+    struct Cell {
+        int xa, ya, xb, yb;
+        std::vector<double> alpha;
+        std::string error;
+    };
+    std::vector<Cell> cells;
     for (int y0 = 0; y0 < h; y0 += kCell) {
         for (int x0 = 0; x0 < w; x0 += kCell) {
             const int ch = std::min(kCell, h - y0), cw = std::min(kCell, w - x0);
@@ -241,41 +250,62 @@ std::vector<float> MattingStack::band(const MattingFrame& frame, const std::vect
                         break;
                     }
             if (!any_unknown) continue;
-            const int ya = std::max(y0 - pad, 0), yb = std::min(y0 + kCell + pad, h);
-            const int xa = std::max(x0 - pad, 0), xb = std::min(x0 + kCell + pad, w);
-            const int rw = xb - xa, rh = yb - ya;
+            cells.push_back({std::max(x0 - pad, 0), std::max(y0 - pad, 0), std::min(x0 + kCell + pad, w),
+                             std::min(y0 + kCell + pad, h), {}, {}});
+        }
+    }
+    // Solved on every core: each cell is its own problem. A cell without
+    // both subject and wall to solve between keeps the matte as it is.
+    parallel_for(cells.size(), [&](std::size_t c0, std::size_t c1) {
+        for (std::size_t k = c0; k < c1; ++k) {
+            Cell& cell = cells[k];
+            const int rw = cell.xb - cell.xa, rh = cell.yb - cell.ya;
             std::vector<double> region_trimap(static_cast<std::size_t>(rw) * rh);
             std::vector<double> region_rgb(region_trimap.size() * 3);
             bool has_fg = false, has_bg = false;
             for (int y = 0; y < rh; ++y)
                 for (int x = 0; x < rw; ++x) {
-                    const std::size_t s = static_cast<std::size_t>(ya + y) * w + (xa + x);
+                    const std::size_t src = static_cast<std::size_t>(cell.ya + y) * w + (cell.xa + x);
                     const std::size_t d = static_cast<std::size_t>(y) * rw + x;
-                    region_trimap[d] = trimap[s];
-                    has_fg = has_fg || trimap[s] == 1.0;
-                    has_bg = has_bg || trimap[s] == 0.0;
-                    for (int c = 0; c < 3; ++c) region_rgb[d * 3 + c] = guide[c][s];
+                    region_trimap[d] = trimap[src];
+                    has_fg = has_fg || trimap[src] == 1.0;
+                    has_bg = has_bg || trimap[src] == 0.0;
+                    for (int c = 0; c < 3; ++c) region_rgb[d * 3 + c] = guide[c][src];
                 }
             if (!has_fg || !has_bg) continue;
-            const std::vector<double> a = estimate_alpha_cf(region_rgb, region_trimap, rw, rh, error);
-            if (a.empty()) return {};
-            // The weight across, and down: a ramp at each side that meets
-            // another cell, none at the frame's edge.
-            auto weight_at = [&](int p, int lo, int hi, int limit) {
-                float t = 1.0f;
-                if (lo > 0) t = std::min(t, (static_cast<float>(p - lo) + 0.5f) / ramp);
-                if (hi < limit) t = std::min(t, (static_cast<float>(hi - p) - 0.5f) / ramp);
-                return std::clamp(t, 0.0f, 1.0f);
-            };
-            for (int y = 0; y < rh; ++y) {
-                const float wy = weight_at(ya + y, ya, yb, h);
-                for (int x = 0; x < rw; ++x) {
-                    const float wt = wy * weight_at(xa + x, xa, xb, w);
-                    if (wt <= 0.0f) continue;
-                    const std::size_t s = static_cast<std::size_t>(ya + y) * w + (xa + x);
-                    acc[s] += wt * static_cast<float>(a[static_cast<std::size_t>(y) * rw + x]);
-                    coverage[s] += wt;
-                }
+            cell.alpha = estimate_alpha_cf(region_rgb, region_trimap, rw, rh, &cell.error);
+            if (cell.alpha.empty() && cell.error.empty()) cell.error = "the edge solve failed";
+        }
+    }, 1);
+    for (const Cell& cell : cells)
+        if (!cell.error.empty()) {
+            if (error) *error = cell.error;
+            return {};
+        }
+
+    // Blended in the order they were laid out, as before: the sums come out
+    // the same whichever cell finished first.
+    for (const Cell& cell : cells) {
+        if (cell.alpha.empty()) continue;
+        const int xa = cell.xa, ya = cell.ya, xb = cell.xb, yb = cell.yb;
+        const int rw = xb - xa, rh = yb - ya;
+        const std::vector<double>& a = cell.alpha;
+        // The weight across, and down: a ramp at each side that meets
+        // another cell, none at the frame's edge.
+        auto weight_at = [&](int p, int lo, int hi, int limit) {
+            float t = 1.0f;
+            if (lo > 0) t = std::min(t, (static_cast<float>(p - lo) + 0.5f) / ramp);
+            if (hi < limit) t = std::min(t, (static_cast<float>(hi - p) - 0.5f) / ramp);
+            return std::clamp(t, 0.0f, 1.0f);
+        };
+        for (int y = 0; y < rh; ++y) {
+            const float wy = weight_at(ya + y, ya, yb, h);
+            for (int x = 0; x < rw; ++x) {
+                const float wt = wy * weight_at(xa + x, xa, xb, w);
+                if (wt <= 0.0f) continue;
+                const std::size_t s = static_cast<std::size_t>(ya + y) * w + (xa + x);
+                acc[s] += wt * static_cast<float>(a[static_cast<std::size_t>(y) * rw + x]);
+                coverage[s] += wt;
             }
         }
     }
