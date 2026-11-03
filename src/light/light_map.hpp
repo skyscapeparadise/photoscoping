@@ -34,6 +34,8 @@ void output_size(const std::vector<fixes::Point>& corners, int size, int* width,
 // samples a pixel when the crop is being made much smaller.
 std::vector<float> warp(const std::vector<float>& planes, int channels, int frame_w, int frame_h,
                         const Homography& h, int width, int height);
+// How many samples each way warp() takes per output pixel (1 to 4).
+int warp_samples(const Homography& h, int width, int height);
 
 // The light on a flat backdrop is smooth, so behind the performer it is
 // estimated as a smooth surface -- a quadratic in x and y, per channel --
@@ -54,6 +56,24 @@ struct LightSurface {
 LightSurface fit_light_surface(const std::vector<float>& light, const std::vector<std::uint8_t>& not_wall,
                                int frame_w, int frame_h, const std::vector<fixes::Point>& corners,
                                bool whole_frame = false);
+// Where a surface is fitted: a grid over the crop and half its size again
+// on every side (the whole frame for `whole_frame`), every `stride` pixels.
+struct FitGrid {
+    int rx0 = 0, ry0 = 0, rx1 = -1, ry1 = -1, stride = 1;
+    double cx = 0, cy = 0, scale = 1;
+    bool whole_frame = false;
+    bool valid() const { return rx1 >= rx0 && ry1 >= ry0; }
+    int columns() const { return valid() ? (rx1 - rx0) / stride + 1 : 0; }
+    int rows() const { return valid() ? (ry1 - ry0) / stride + 1 : 0; }
+    std::size_t count() const { return static_cast<std::size_t>(columns()) * rows(); }
+};
+FitGrid fit_grid(const std::vector<fixes::Point>& corners, int frame_w, int frame_h, bool whole_frame);
+
+// The fit from the grid's samples: `values` three planes of count(), `wall`
+// nonzero where the sample is backdrop.
+LightSurface fit_samples(const FitGrid& grid, const std::vector<float>& values,
+                         const std::vector<std::uint8_t>& wall);
+
 // The surface through a crop's homography: planar RGB, width x height.
 std::vector<float> surface_image(const LightSurface& surface, const Homography& h, int width, int height);
 
@@ -102,6 +122,35 @@ struct FrameLight {
 FrameLight prepare_frame_light(const std::vector<float>& linear, const std::vector<float>& alpha,
                                int width, int height, const std::vector<float>* plate,
                                bool fill_shadows);
+
+// What a crop takes from the frame, all crop-sized: the frame's light and the
+// matte warped to it, the plate warped likewise (empty without one), and the
+// surface fitted around it. Made on the CPU by render_crop, or on the GPU.
+struct CropSource {
+    std::vector<float> rgb, alpha, plate;
+    LightSurface surface;
+};
+// The crop finished from its source: the backdrop behind the performer
+// estimated, their shadow found if it is being filled, and the fill eased in.
+std::vector<float> finish_crop(const CropSource& source, const Homography& h, int width, int height,
+                               bool fill_shadows, bool with_plate);
+
+// How far from the performer the backdrop is kept back, in pixels.
+int backdrop_margin(int frame_width, bool fill_shadows);
+
+// prepare_frame_light's not_wall, asked only where a fit samples: hidden
+// within `margin` steps (Manhattan) of any pixel the matte gives the
+// performer. Built from row distances, so the frame is never dilated whole.
+class BackdropMask {
+public:
+    void build(const std::vector<float>& alpha, int width, int height, int margin);
+    bool hidden(int x, int y) const;
+    std::vector<std::uint8_t> wall_at(const FitGrid& grid) const;
+
+private:
+    std::vector<std::uint16_t> reach_;
+    int width_ = 0, height_ = 0, margin_ = 0;
+};
 
 // One crop of a frame: straightened to width x height, the performer -- and
 // their shadow, if filling -- replaced by the backdrop behind them. Planar

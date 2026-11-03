@@ -297,4 +297,137 @@ void SubjectGpu::blur(SDL_GPUCommandBuffer* cmd, Buffer& planes, Buffer& scratch
     dispatch(cmd, {&blur_, {&scratch}, {&planes}, &p, sizeof p, nullptr, nullptr, p.width, p.height});
 }
 
+namespace {
+
+struct GatherParams {
+    Uint32 fw, fh, rx0, ry0, stride, gw, gh, ratio;
+};
+struct WarpParams {
+    Uint32 fw, fh, ow, oh, k, has_plate, pad0, pad1;
+    float hm[12];
+};
+
+SDL_GPUSampler* nearest_sampler(SDL_GPUDevice* device) {
+    SDL_GPUSamplerCreateInfo info = {};
+    info.min_filter = SDL_GPU_FILTER_NEAREST;
+    info.mag_filter = SDL_GPU_FILTER_NEAREST;
+    info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    return SDL_CreateGPUSampler(device, &info);
+}
+
+}  // namespace
+
+LightGpu::LightGpu(SDL_GPUDevice* device) : device_(device), transfer_(device) {
+    sampler_ = nearest_sampler(device);
+    auto make = [&](const char* msl, Uint32 samplers, Uint32 ro, Uint32 rw) {
+        KernelLayout l;
+        l.samplers = samplers;
+        l.readonly_buffers = ro;
+        l.readwrite_buffers = rw;
+        return create_kernel(device, msl, l);
+    };
+    prepare_ = make(shaders::kSubjectPrepare, 1, 0, 1);
+    gather_ = make(shaders::kLightGather, 0, 2, 1);
+    warp_ = make(shaders::kLightWarp, 0, 3, 3);
+    ok_ = sampler_ && prepare_ && gather_ && warp_;
+}
+
+LightGpu::~LightGpu() {
+    for (Kernel* k : {&prepare_, &gather_, &warp_}) release_kernel(device_, *k);
+    if (sampler_) SDL_ReleaseGPUSampler(device_, sampler_);
+}
+
+bool LightGpu::set_plate(const std::vector<float>& linear, int width, int height) {
+    has_plate_ = false;
+    if (linear.empty()) return true;
+    const std::size_t bytes = static_cast<std::size_t>(width) * height * 3 * sizeof(float);
+    if (linear.size() * sizeof(float) != bytes || !plate_.reserve(device_, bytes) ||
+        !transfer_.upload(plate_, linear))
+        return false;
+    has_plate_ = true;
+    return true;
+}
+
+bool LightGpu::begin_frame(SDL_GPUTexture* texture, const std::vector<float>& alpha, int width, int height) {
+    if (!ok_) return false;
+    const std::size_t n = static_cast<std::size_t>(width) * height;
+    width_ = width;
+    height_ = height;
+    if (!lin_.reserve(device_, n * 3 * sizeof(float)) || !alpha_.reserve(device_, n * sizeof(float))) return false;
+    if (alpha.size() == n) {
+        if (!transfer_.upload(alpha_, alpha)) return false;
+    } else {
+        const std::vector<float> none(n, 0.0f);
+        if (!transfer_.upload(alpha_, none)) return false;
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (!cmd) return false;
+    const Size2 p{static_cast<Uint32>(width), static_cast<Uint32>(height)};
+    dispatch(cmd, {&prepare_, {}, {&lin_}, &p, sizeof p, texture, sampler_, p.width, p.height});
+    return SDL_SubmitGPUCommandBuffer(cmd);
+}
+
+bool LightGpu::begin_frame_linear(const std::vector<float>& linear, const std::vector<float>& alpha, int width,
+                                  int height) {
+    if (!ok_) return false;
+    const std::size_t n = static_cast<std::size_t>(width) * height;
+    width_ = width;
+    height_ = height;
+    if (linear.size() != n * 3 || !lin_.reserve(device_, n * 3 * sizeof(float)) ||
+        !alpha_.reserve(device_, n * sizeof(float)) || !transfer_.upload(lin_, linear))
+        return false;
+    return alpha.size() == n ? transfer_.upload(alpha_, alpha) : transfer_.upload(alpha_, std::vector<float>(n, 0.0f));
+}
+
+bool LightGpu::gather(int x0, int y0, int stride, int columns, int rows, bool ratio, std::vector<float>* values) {
+    const std::size_t gn = static_cast<std::size_t>(columns) * rows;
+    if (gn == 0 || !values_.reserve(device_, gn * 3 * sizeof(float))) return false;
+    ratio = ratio && has_plate_;
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (!cmd) return false;
+    const GatherParams p{static_cast<Uint32>(width_), static_cast<Uint32>(height_), static_cast<Uint32>(x0),
+                         static_cast<Uint32>(y0), static_cast<Uint32>(stride), static_cast<Uint32>(columns),
+                         static_cast<Uint32>(rows), ratio ? 1u : 0u};
+    dispatch(cmd, {&gather_, {&lin_, ratio ? &plate_ : &lin_}, {&values_}, &p, sizeof p, nullptr, nullptr, p.gw,
+                   p.gh});
+    if (!SDL_SubmitGPUCommandBuffer(cmd)) return false;
+    values->resize(gn * 3);
+    return transfer_.download(values_, *values);
+}
+
+bool LightGpu::warp(const double m[9], int samples, int width, int height, bool with_plate,
+                    std::vector<float>* rgb, std::vector<float>* alpha, std::vector<float>* plate) {
+    const std::size_t on = static_cast<std::size_t>(width) * height;
+    with_plate = with_plate && has_plate_;
+    if (on == 0 || !rgb_.reserve(device_, on * 3 * sizeof(float)) ||
+        !crop_alpha_.reserve(device_, on * sizeof(float)) ||
+        !crop_plate_.reserve(device_, (with_plate ? on * 3 : 1) * sizeof(float)))
+        return false;
+    WarpParams p = {};
+    p.fw = static_cast<Uint32>(width_);
+    p.fh = static_cast<Uint32>(height_);
+    p.ow = static_cast<Uint32>(width);
+    p.oh = static_cast<Uint32>(height);
+    p.k = static_cast<Uint32>(std::clamp(samples, 1, 4));
+    p.has_plate = with_plate ? 1u : 0u;
+    for (int i = 0; i < 9; ++i) p.hm[i] = static_cast<float>(m[i]);
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (!cmd) return false;
+    dispatch(cmd, {&warp_, {&lin_, &alpha_, with_plate ? &plate_ : &lin_}, {&rgb_, &crop_alpha_, &crop_plate_}, &p,
+                   sizeof p, nullptr, nullptr, p.ow, p.oh});
+    if (!SDL_SubmitGPUCommandBuffer(cmd)) return false;
+    rgb->resize(on * 3);
+    alpha->resize(on);
+    if (!transfer_.download(rgb_, *rgb) || !transfer_.download(crop_alpha_, *alpha)) return false;
+    if (with_plate) {
+        plate->resize(on * 3);
+        return transfer_.download(crop_plate_, *plate);
+    }
+    plate->clear();
+    return true;
+}
+
 }  // namespace ps::gpu

@@ -1,10 +1,13 @@
 #include "export/light_export.hpp"
 
+#include "gpu/compute_ops.hpp"
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -87,6 +90,15 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
         return false;
     }
     const matting::PlateImage& light_plate = scene_plate.empty() ? plate : scene_plate;
+    // Each crop cut from the frame on the GPU, where the frame already is;
+    // only crops come back. The CPU route stays for a device without compute.
+    auto light_gpu = std::make_unique<gpu::LightGpu>(gpu.device());
+    if (std::getenv("PHOTOSCOPING_CPU")) {
+        light_gpu.reset();  // for comparing the two routes
+    } else if (!light_gpu->ok() || !light_gpu->set_plate(light_plate.linear, w, h)) {
+        std::fprintf(stderr, "the GPU cannot cut the light maps here; on the CPU instead\n");
+        light_gpu.reset();
+    }
     MatteComposer composer;
     composer.open(request.render_dir, stem, fixes, w, h, total, request.models, request.model_cpu,
                   plate.empty() ? nullptr : &plate);
@@ -126,7 +138,9 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
     // Each frame two ways: as the LUT shows it, which the matte is made from
     // (and the look), and as scene light, for linear light.
     std::vector<float> scene_light;  // planar linear Rec.709, the frame read last
-    // Measuring linear light needs only the scene light, not the look.
+    // `look`: the frame as the LUT shows it is wanted in memory -- for the
+    // look's light, or a re-matte patch still to make. Measuring linear light
+    // needs only the scene light. On the GPU route the light stays there.
     auto read_frame = [&](std::int64_t f, bool seek,
                           bool look = true) -> std::unique_ptr<matting::MattingFrame> {
         if (seek ? !decoder.seek_frame(f) : !decoder.read_next()) return nullptr;
@@ -136,6 +150,12 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
         SDL_SubmitGPUCommandBuffer(cmd);
         if (!ingested) return nullptr;
         auto frame = std::make_unique<matting::MattingFrame>();
+        if (light_gpu) {
+            if (look)
+                *frame = matting::prepare_frame(ingest.read_working(), static_cast<int>(ingest.width()),
+                                                static_cast<int>(ingest.height()));
+            return frame;
+        }
         if (look || !settings.linear)
             *frame = matting::prepare_frame(ingest.read_working(), static_cast<int>(ingest.width()),
                                             static_cast<int>(ingest.height()));
@@ -145,6 +165,8 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
                               .linear;
         return frame;
     };
+    // The texture the light is cut from on the GPU route.
+    auto light_texture = [&] { return settings.linear ? ingest.scene() : ingest.working(); };
     // The light the maps are made of.
     auto light_of = [&](const matting::MattingFrame& frame) -> const std::vector<float>& {
         return settings.linear ? scene_light : frame.linear;
@@ -163,12 +185,24 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
                 return false;
             }
             const std::vector<float> alpha = read_shown_matte(request.render_dir, stem, fixes, f, w, h);
+            if (light_gpu && !light_gpu->begin_frame(light_texture(), alpha, w, h)) {
+                std::fprintf(stderr, "frame %lld: the GPU could not take the frame\n", static_cast<long long>(f));
+                return false;
+            }
             for (const auto& out : outputs) {
                 const light::Homography hm = light::quad_homography(out->crop->at(f), out->width, out->height);
-                const std::vector<float> rgb = light::warp(light_of(*frame), 3, w, h, hm, out->width, out->height);
-                const std::vector<float> a =
-                    alpha.empty() ? std::vector<float>(static_cast<std::size_t>(out->width) * out->height, 0.0f)
-                                  : light::warp(alpha, 1, w, h, hm, out->width, out->height);
+                std::vector<float> rgb, a, unused;
+                if (light_gpu) {
+                    if (!light_gpu->warp(hm.m, light::warp_samples(hm, out->width, out->height), out->width,
+                                         out->height, false, &rgb, &a, &unused)) {
+                        std::fprintf(stderr, "frame %lld: the GPU could not cut a crop\n", static_cast<long long>(f));
+                        return false;
+                    }
+                } else {
+                    rgb = light::warp(light_of(*frame), 3, w, h, hm, out->width, out->height);
+                    a = alpha.empty() ? std::vector<float>(static_cast<std::size_t>(out->width) * out->height, 0.0f)
+                                      : light::warp(alpha, 1, w, h, hm, out->width, out->height);
+                }
                 const std::size_t n = static_cast<std::size_t>(out->width) * out->height;
                 for (std::size_t i = 0; i + 1 < n; ++i) {
                     if (a[i] >= 0.5f || a[i + 1] >= 0.5f) continue;
@@ -206,7 +240,7 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
 
     for (std::int64_t f = first; f <= last; ++f) {
         const Uint64 t = SDL_GetTicksNS();
-        const auto frame = read_frame(f, f == first);
+        const auto frame = read_frame(f, f == first, !light_gpu || composer.needs_frame(f));
         if (!frame) {
             std::fprintf(stderr, "cannot decode frame %lld\n", static_cast<long long>(f));
             return false;
@@ -217,14 +251,49 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
             return false;
         }
 
-        const light::FrameLight fl = light::prepare_frame_light(
-            light_of(*frame), alpha, w, h, light_plate.empty() ? nullptr : &light_plate.linear,
-            settings.fill_shadows);
+        light::FrameLight fl;
+        light::BackdropMask mask;
+        if (light_gpu) {
+            if (!light_gpu->begin_frame(light_texture(), alpha, w, h)) {
+                std::fprintf(stderr, "frame %lld: the GPU could not take the frame\n", static_cast<long long>(f));
+                return false;
+            }
+            mask.build(alpha, w, h, light::backdrop_margin(w, settings.fill_shadows));
+        } else {
+            fl = light::prepare_frame_light(light_of(*frame), alpha, w, h,
+                                            light_plate.empty() ? nullptr : &light_plate.linear,
+                                            settings.fill_shadows);
+        }
 
         for (const auto& out : outputs) {
             const int ow = out->width, oh = out->height;
             const std::size_t n = static_cast<std::size_t>(ow) * oh;
-            const std::vector<float> filled = light::render_crop(fl, out->crop->at(f), ow, oh);
+            std::vector<float> filled;
+            if (light_gpu) {
+                // As render_crop, its reads of the frame made on the GPU.
+                const std::vector<fixes::Point> corners = out->crop->at(f);
+                const light::Homography hm = light::quad_homography(corners, ow, oh);
+                const bool with_plate = light_gpu->has_plate();
+                const light::FitGrid grid =
+                    light::fit_grid(corners, w, h, settings.fill_shadows && with_plate);
+                std::vector<float> values;
+                light::CropSource src;
+                if (!light_gpu->gather(grid.rx0, grid.ry0, grid.stride, grid.columns(), grid.rows(), with_plate,
+                                       &values)) {
+                    std::fprintf(stderr, "frame %lld: the GPU could not sample the backdrop\n",
+                                 static_cast<long long>(f));
+                    return false;
+                }
+                src.surface = light::fit_samples(grid, values, mask.wall_at(grid));
+                if (!light_gpu->warp(hm.m, light::warp_samples(hm, ow, oh), ow, oh,
+                                     with_plate && src.surface.terms, &src.rgb, &src.alpha, &src.plate)) {
+                    std::fprintf(stderr, "frame %lld: the GPU could not cut a crop\n", static_cast<long long>(f));
+                    return false;
+                }
+                filled = light::finish_crop(src, hm, ow, oh, settings.fill_shadows, with_plate);
+            } else {
+                filled = light::render_crop(fl, out->crop->at(f), ow, oh);
+            }
             // Encoded for sRGB -- scaled, for linear light; clipped, for the
             // look -- and adjusted there, as Photoshop adjusts.
             const std::vector<float> encoded =

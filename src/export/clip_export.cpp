@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 
@@ -427,7 +428,7 @@ bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestP
     // straight from the ingest pass; the CPU version stays for a device
     // without compute.
     std::unique_ptr<gpu::SubjectGpu> subject_gpu;
-    if (info.subject()) {
+    if (info.subject() && !std::getenv("PHOTOSCOPING_CPU")) {  // set to compare the two routes
         subject_gpu = std::make_unique<gpu::SubjectGpu>(gpu.device());
         if (!subject_gpu->ok() || !subject_gpu->set_plate(plate.linear, w, h)) {
             std::fprintf(stderr, "the GPU cannot work out the subject here; on the CPU instead\n");

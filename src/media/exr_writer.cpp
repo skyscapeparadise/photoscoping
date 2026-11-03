@@ -1,4 +1,5 @@
 #include "media/exr_writer.hpp"
+#include "matting/parallel.hpp"
 
 #include <zlib.h>
 
@@ -79,45 +80,54 @@ bool write_exr_half(const std::string& path, const std::vector<float>& rgb, int 
     const std::size_t table_at = out.size();
     out.resize(out.size() + static_cast<std::size_t>(blocks) * 8);
 
-    std::vector<std::uint8_t> raw, shuffled;
+    // Each block packed on its own, so on every core; then laid out in order.
+    struct Block {
+        std::vector<std::uint8_t> data;
+        bool zipped = false;
+    };
+    std::vector<Block> packed_blocks(static_cast<std::size_t>(blocks));
     const float* planes[3] = {&rgb[2 * n], &rgb[n], &rgb[0]};  // B, G, R
+    matting::parallel_for(static_cast<std::size_t>(blocks), [&](std::size_t b0, std::size_t b1) {
+        std::vector<std::uint8_t> raw, shuffled;
+        for (std::size_t b = b0; b < b1; ++b) {
+            const int y0 = static_cast<int>(b) * kLinesPerBlock, y1 = std::min(height, y0 + kLinesPerBlock);
+            // Each line: every channel's halves in turn, little-endian.
+            raw.clear();
+            for (int y = y0; y < y1; ++y)
+                for (const float* plane : planes)
+                    for (int x = 0; x < width; ++x) {
+                        const std::uint16_t h = float_to_half(plane[static_cast<std::size_t>(y) * width + x]);
+                        raw.push_back(static_cast<std::uint8_t>(h));
+                        raw.push_back(static_cast<std::uint8_t>(h >> 8));
+                    }
+            // OpenEXR's ZIP: bytes split into evens then odds, then each byte
+            // stored as its difference from the one before.
+            shuffled.resize(raw.size());
+            const std::size_t half_size = (raw.size() + 1) / 2;
+            for (std::size_t i = 0; i < raw.size(); ++i)
+                shuffled[(i & 1) ? half_size + i / 2 : i / 2] = raw[i];
+            for (std::size_t i = shuffled.size() - 1; i > 0; --i)
+                shuffled[i] = static_cast<std::uint8_t>(static_cast<int>(shuffled[i]) - shuffled[i - 1] + 128 + 256);
+            uLongf packed_size = compressBound(static_cast<uLong>(shuffled.size()));
+            Block& block = packed_blocks[b];
+            block.data.resize(packed_size);
+            // Level 4, OpenEXR's own default: most of the size of 6 for much
+            // less time.
+            block.zipped = compress2(block.data.data(), &packed_size, shuffled.data(),
+                                     static_cast<uLong>(shuffled.size()), 4) == Z_OK &&
+                           packed_size < raw.size();
+            // Stored as is when deflate would not make it smaller; a reader
+            // knows by the size.
+            if (block.zipped) block.data.resize(packed_size);
+            else block.data = raw;
+        }
+    }, 1);
     for (int b = 0; b < blocks; ++b) {
-        const int y0 = b * kLinesPerBlock, y1 = std::min(height, y0 + kLinesPerBlock);
-        // Each line: every channel's halves in turn, little-endian.
-        raw.clear();
-        for (int y = y0; y < y1; ++y)
-            for (const float* plane : planes)
-                for (int x = 0; x < width; ++x) {
-                    const std::uint16_t h = float_to_half(plane[static_cast<std::size_t>(y) * width + x]);
-                    raw.push_back(static_cast<std::uint8_t>(h));
-                    raw.push_back(static_cast<std::uint8_t>(h >> 8));
-                }
-        // OpenEXR's ZIP: bytes split into evens then odds, then each byte
-        // stored as its difference from the one before.
-        shuffled.resize(raw.size());
-        const std::size_t half_size = (raw.size() + 1) / 2;
-        for (std::size_t i = 0; i < raw.size(); ++i)
-            shuffled[(i & 1) ? half_size + i / 2 : i / 2] = raw[i];
-        for (std::size_t i = shuffled.size() - 1; i > 0; --i)
-            shuffled[i] = static_cast<std::uint8_t>(static_cast<int>(shuffled[i]) - shuffled[i - 1] + 128 + 256);
-        uLongf packed_size = compressBound(static_cast<uLong>(shuffled.size()));
-        std::vector<std::uint8_t> packed(packed_size);
-        const bool zipped = compress2(packed.data(), &packed_size, shuffled.data(),
-                                      static_cast<uLong>(shuffled.size()), Z_DEFAULT_COMPRESSION) == Z_OK &&
-                            packed_size < raw.size();
-
         const std::uint64_t at = out.size();
         for (int i = 0; i < 8; ++i) out[table_at + b * 8 + i] = static_cast<std::uint8_t>(at >> (8 * i));
-        put32(out, static_cast<std::uint32_t>(y0));
-        // Stored as is when deflate would not make it smaller; a reader
-        // knows by the size.
-        if (zipped) {
-            put32(out, static_cast<std::uint32_t>(packed_size));
-            put(out, packed.data(), packed_size);
-        } else {
-            put32(out, static_cast<std::uint32_t>(raw.size()));
-            put(out, raw.data(), raw.size());
-        }
+        put32(out, static_cast<std::uint32_t>(b * kLinesPerBlock));
+        put32(out, static_cast<std::uint32_t>(packed_blocks[b].data.size()));
+        put(out, packed_blocks[b].data.data(), packed_blocks[b].data.size());
     }
 
     std::FILE* f = std::fopen(path.c_str(), "wb");

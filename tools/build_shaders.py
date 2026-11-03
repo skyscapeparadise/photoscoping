@@ -62,6 +62,8 @@ SHADERS = [
     ("fg_direct.comp",       "comp", "kForegroundDirect", "cs_main"),
     ("blur_pass.comp",       "comp", "kBlurPass",       "cs_main"),
     ("subject_pack.comp",    "comp", "kSubjectPack",    "cs_main"),
+    ("light_warp.comp",      "comp", "kLightWarp",      "cs_main"),
+    ("light_gather.comp",    "comp", "kLightGather",    "cs_main"),
 ]
 
 

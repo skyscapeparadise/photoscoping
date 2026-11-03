@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "gpu/compute_ops.hpp"
+#include "light/light_map.hpp"
 #include "matting/foreground.hpp"
 #include "matting/plate.hpp"
 #include "matting/png16.hpp"
@@ -126,6 +127,56 @@ void compare(const char* what, const Scene& s, const std::vector<std::uint16_t>&
     (void)worst;
 }
 
+// A light-map crop made on the GPU against render_crop on the CPU.
+void test_light_crop(SDL_GPUDevice* device, const Scene& s, bool with_plate) {
+    ps::gpu::LightGpu gpu(device);
+    CHECK(gpu.ok());
+    CHECK(gpu.set_plate(with_plate ? s.plate : std::vector<float>{}, s.w, s.h));
+    CHECK(gpu.begin_frame_linear(s.linear, s.alpha, s.w, s.h));
+    // A skewed quad over the subject's edge and the wall beside it.
+    const std::vector<ps::fixes::Point> corners = {
+        {s.w * 0.30f, s.h * 0.20f}, {s.w * 0.85f, s.h * 0.25f}, {s.w * 0.80f, s.h * 0.90f}, {s.w * 0.33f, s.h * 0.85f}};
+    int ow = 0, oh = 0;
+    ps::light::output_size(corners, 0, &ow, &oh);
+    const ps::light::FrameLight f = ps::light::prepare_frame_light(s.linear, s.alpha, s.w, s.h,
+                                                                   with_plate ? &s.plate : nullptr, false);
+    const std::vector<float> cpu = ps::light::render_crop(f, corners, ow, oh);
+
+    const ps::light::Homography hm = ps::light::quad_homography(corners, ow, oh);
+    const ps::light::FitGrid grid = ps::light::fit_grid(corners, s.w, s.h, false);
+    std::vector<float> values;
+    CHECK(gpu.gather(grid.rx0, grid.ry0, grid.stride, grid.columns(), grid.rows(), with_plate, &values));
+    ps::light::BackdropMask mask;
+    mask.build(s.alpha, s.w, s.h, ps::light::backdrop_margin(s.w, false));
+    ps::light::CropSource src;
+    src.surface = ps::light::fit_samples(grid, values, mask.wall_at(grid));
+    CHECK(gpu.warp(hm.m, ps::light::warp_samples(hm, ow, oh), ow, oh, with_plate && src.surface.terms, &src.rgb,
+                   &src.alpha, &src.plate));
+    const std::vector<float> out = ps::light::finish_crop(src, hm, ow, oh, false, with_plate);
+
+    CHECK(out.size() == cpu.size());
+    float worst = 0;
+    double sum = 0;
+    for (std::size_t i = 0; i < std::min(out.size(), cpu.size()); ++i) {
+        const float d = std::abs(out[i] - cpu[i]);
+        worst = std::max(worst, d);
+        sum += d;
+    }
+    std::printf("  light crop %dx%d, %s: mean %.6f worst %.5f\n", ow, oh, with_plate ? "with plate" : "no plate",
+                sum / std::max<std::size_t>(cpu.size(), 1), worst);
+    CHECK(worst < 2e-3f);
+
+    // The grid's wall mask against the whole frame dilated, as the CPU has it.
+    const std::vector<std::uint8_t> wall = mask.wall_at(grid);
+    int mismatched = 0;
+    for (int j = 0; j < grid.rows(); ++j)
+        for (int i = 0; i < grid.columns(); ++i) {
+            const std::size_t p = static_cast<std::size_t>(grid.ry0 + j * grid.stride) * s.w + grid.rx0 + i * grid.stride;
+            mismatched += (wall[static_cast<std::size_t>(j) * grid.columns() + i] != 0) == (f.not_wall[p] != 0);
+        }
+    CHECK(mismatched == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -148,6 +199,9 @@ int main() {
         CHECK(subject.set_plate(s.plate, s.w, s.h));
         CHECK(subject.finish_linear(s.linear, s.alpha, s.w, s.h, &gpu));
         compare("subject, with plate", s, cpu_subject(s, true), gpu);
+
+        test_light_crop(device, s, false);
+        test_light_crop(device, s, true);
     }
     SDL_DestroyGPUDevice(device);
     SDL_Quit();

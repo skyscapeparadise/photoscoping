@@ -1,0 +1,23 @@
+#version 450
+
+// The frame's light at a surface fit's grid points -- or, with a plate, the
+// light on it (frame over plate) -- three planes of gw x gh.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 2, binding = 0) uniform Params { uint fw; uint fh; uint rx0; uint ry0; uint stride; uint gw; uint gh; uint ratio; };
+layout(std430, set = 0, binding = 1) readonly buffer Linear { float lin[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Plate { float plate[]; };
+layout(std430, set = 1, binding = 3) writeonly buffer Values { float values[]; };
+
+void main() {
+    uvec2 g = gl_GlobalInvocationID.xy;
+    if (g.x >= gw || g.y >= gh) return;
+    uint fn = fw * fh, gn = gw * gh;
+    uint i = (ry0 + g.y * stride) * fw + rx0 + g.x * stride;
+    for (uint c = 0u; c < 3u; ++c) {
+        float v = lin[c * fn + i];
+        if (ratio != 0u) v = v / max(plate[c * fn + i], 1e-3);
+        values[c * gn + g.y * gw + g.x] = v;
+    }
+}

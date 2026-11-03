@@ -117,10 +117,7 @@ void output_size(const std::vector<fixes::Point>& c, int size, int* width, int* 
     *height = std::max(1, static_cast<int>(std::lround(h)));
 }
 
-std::vector<float> warp(const std::vector<float>& planes, int channels, int fw, int fh,
-                        const Homography& hm, int width, int height) {
-    const std::size_t fn = static_cast<std::size_t>(fw) * fh, n = static_cast<std::size_t>(width) * height;
-    std::vector<float> out(n * channels, 0.0f);
+int warp_samples(const Homography& hm, int width, int height) {
     // How far apart neighbouring output pixels land in the frame, at the
     // centre: samples enough to cover that, up to four each way.
     double x0, y0, x1, y1, x2, y2;
@@ -128,7 +125,14 @@ std::vector<float> warp(const std::vector<float>& planes, int channels, int fw, 
     hm.map(width * 0.5 + 1, height * 0.5, &x1, &y1);
     hm.map(width * 0.5, height * 0.5 + 1, &x2, &y2);
     const double spread = std::max(std::hypot(x1 - x0, y1 - y0), std::hypot(x2 - x0, y2 - y0));
-    const int k = std::clamp(static_cast<int>(std::ceil(spread)), 1, 4);
+    return std::clamp(static_cast<int>(std::ceil(spread)), 1, 4);
+}
+
+std::vector<float> warp(const std::vector<float>& planes, int channels, int fw, int fh,
+                        const Homography& hm, int width, int height) {
+    const std::size_t fn = static_cast<std::size_t>(fw) * fh, n = static_cast<std::size_t>(width) * height;
+    std::vector<float> out(n * channels, 0.0f);
+    const int k = warp_samples(hm, width, height);
     const float weight = 1.0f / static_cast<float>(k * k);
     matting::parallel_for(static_cast<std::size_t>(height), [&](std::size_t v0, std::size_t v1) {
     for (int v = static_cast<int>(v0); v < static_cast<int>(v1); ++v)
@@ -187,10 +191,9 @@ float LightSurface::at(int channel, double x, double y) const {
     return static_cast<float>(s);
 }
 
-LightSurface fit_light_surface(const std::vector<float>& light, const std::vector<std::uint8_t>& not_wall,
-                               int fw, int fh, const std::vector<fixes::Point>& corners, bool whole_frame) {
-    LightSurface out;
-    if (corners.size() != 4) return out;
+FitGrid fit_grid(const std::vector<fixes::Point>& corners, int fw, int fh, bool whole_frame) {
+    FitGrid g;
+    if (corners.size() != 4 || fw <= 0 || fh <= 0) return g;
     float x0 = corners[0].x, x1 = x0, y0 = corners[0].y, y1 = y0;
     for (const fixes::Point& p : corners) {
         x0 = std::min(x0, p.x);
@@ -199,31 +202,60 @@ LightSurface fit_light_surface(const std::vector<float>& light, const std::vecto
         y1 = std::max(y1, p.y);
     }
     const float mx = (x1 - x0) * 0.5f, my = (y1 - y0) * 0.5f;
-    int rx0 = std::clamp(static_cast<int>(x0 - mx), 0, fw - 1), rx1 = std::clamp(static_cast<int>(x1 + mx), 0, fw - 1);
-    int ry0 = std::clamp(static_cast<int>(y0 - my), 0, fh - 1), ry1 = std::clamp(static_cast<int>(y1 + my), 0, fh - 1);
+    g.rx0 = std::clamp(static_cast<int>(x0 - mx), 0, fw - 1);
+    g.rx1 = std::clamp(static_cast<int>(x1 + mx), 0, fw - 1);
+    g.ry0 = std::clamp(static_cast<int>(y0 - my), 0, fh - 1);
+    g.ry1 = std::clamp(static_cast<int>(y1 + my), 0, fh - 1);
     if (whole_frame) {
-        rx0 = ry0 = 0;
-        rx1 = fw - 1;
-        ry1 = fh - 1;
+        g.rx0 = g.ry0 = 0;
+        g.rx1 = fw - 1;
+        g.ry1 = fh - 1;
     }
-    out.cx = (rx0 + rx1) * 0.5;
-    out.cy = (ry0 + ry1) * 0.5;
-    out.scale = 2.0 / std::max(1, std::max(rx1 - rx0, ry1 - ry0));
+    g.cx = (g.rx0 + g.rx1) * 0.5;
+    g.cy = (g.ry0 + g.ry1) * 0.5;
+    g.scale = 2.0 / std::max(1, std::max(g.rx1 - g.rx0, g.ry1 - g.ry0));
+    // Every few pixels: enough to fit, few enough to be quick.
+    g.stride = std::max(2, std::max(g.rx1 - g.rx0, g.ry1 - g.ry0) / 160);
+    g.whole_frame = whole_frame;
+    return g;
+}
 
-    // The backdrop's pixels in the region, every few: enough to fit, few
-    // enough to be quick.
-    const std::size_t fn = static_cast<std::size_t>(fw) * fh;
-    const int stride = std::max(2, std::max(rx1 - rx0, ry1 - ry0) / 160);
+LightSurface fit_light_surface(const std::vector<float>& light, const std::vector<std::uint8_t>& not_wall,
+                               int fw, int fh, const std::vector<fixes::Point>& corners, bool whole_frame) {
+    const FitGrid g = fit_grid(corners, fw, fh, whole_frame);
+    if (!g.valid()) return {};
+    const std::size_t fn = static_cast<std::size_t>(fw) * fh, gn = g.count();
+    std::vector<float> values(gn * 3);
+    std::vector<std::uint8_t> wall(gn);
+    for (int j = 0; j < g.rows(); ++j)
+        for (int i = 0; i < g.columns(); ++i) {
+            const std::size_t k = static_cast<std::size_t>(j) * g.columns() + i;
+            const std::size_t p = static_cast<std::size_t>(g.ry0 + j * g.stride) * fw + (g.rx0 + i * g.stride);
+            wall[k] = !not_wall[p];
+            for (int c = 0; c < 3; ++c) values[c * gn + k] = light[c * fn + p];
+        }
+    return fit_samples(g, values, wall);
+}
+
+LightSurface fit_samples(const FitGrid& g, const std::vector<float>& values, const std::vector<std::uint8_t>& wall) {
+    LightSurface out;
+    if (!g.valid()) return out;
+    out.cx = g.cx;
+    out.cy = g.cy;
+    out.scale = g.scale;
+    const bool whole_frame = g.whole_frame;
+    const std::size_t gn = g.count();
+    // The backdrop's pixels on the grid.
     std::vector<double> us, vs, vals[3];
-    std::size_t region = 0;
-    for (int y = ry0; y <= ry1; y += stride)
-        for (int x = rx0; x <= rx1; x += stride) {
-            ++region;
-            const std::size_t i = static_cast<std::size_t>(y) * fw + x;
-            if (not_wall[i]) continue;
+    const std::size_t region = gn;
+    for (int j = 0; j < g.rows(); ++j)
+        for (int i = 0; i < g.columns(); ++i) {
+            const std::size_t k = static_cast<std::size_t>(j) * g.columns() + i;
+            if (!wall[k]) continue;
+            const int x = g.rx0 + i * g.stride, y = g.ry0 + j * g.stride;
             us.push_back((x + 0.5 - out.cx) * out.scale);
             vs.push_back((y + 0.5 - out.cy) * out.scale);
-            for (int c = 0; c < 3; ++c) vals[c].push_back(light[c * fn + i]);
+            for (int c = 0; c < 3; ++c) vals[c].push_back(values[c * gn + k]);
         }
     const std::size_t n = us.size();
     if (n < 12) return out;
@@ -286,13 +318,15 @@ LightSurface fit_light_surface(const std::vector<float>& light, const std::vecto
 std::vector<float> surface_image(const LightSurface& surface, const Homography& hm, int width, int height) {
     const std::size_t n = static_cast<std::size_t>(width) * height;
     std::vector<float> out(n * 3);
-    for (int v = 0; v < height; ++v)
-        for (int u = 0; u < width; ++u) {
-            double x, y;
-            hm.map(u + 0.5, v + 0.5, &x, &y);
-            const std::size_t i = static_cast<std::size_t>(v) * width + u;
-            for (int c = 0; c < 3; ++c) out[c * n + i] = std::max(0.0f, surface.at(c, x, y));
-        }
+    matting::parallel_for(static_cast<std::size_t>(height), [&](std::size_t v0, std::size_t v1) {
+        for (int v = static_cast<int>(v0); v < static_cast<int>(v1); ++v)
+            for (int u = 0; u < width; ++u) {
+                double x, y;
+                hm.map(u + 0.5, v + 0.5, &x, &y);
+                const std::size_t i = static_cast<std::size_t>(v) * width + u;
+                for (int c = 0; c < 3; ++c) out[c * n + i] = std::max(0.0f, surface.at(c, x, y));
+            }
+    }, 8);
     return out;
 }
 
@@ -300,11 +334,8 @@ std::vector<float> fill_behind(const std::vector<float>& light, const std::vecto
                                const std::vector<float>& wall, int width, int height) {
     const std::size_t n = static_cast<std::size_t>(width) * height;
     std::vector<std::uint8_t> known(n);
-    std::size_t known_count = 0;
-    for (std::size_t i = 0; i < n; ++i) {
-        known[i] = cover[i] < 0.002f;
-        known_count += known[i];
-    }
+    for (std::size_t i = 0; i < n; ++i) known[i] = cover[i] < 0.002f;
+    const std::size_t known_count = static_cast<std::size_t>(std::count(known.begin(), known.end(), 1));
     // What the wall estimate gets wrong, measured where the backdrop shows
     // and carried in behind the performer -- so the fill meets the real
     // backdrop at its edge. With none showing, the estimate stands alone.
@@ -326,14 +357,16 @@ std::vector<float> fill_behind(const std::vector<float>& light, const std::vecto
         }
     }
     std::vector<float> out(n * 3);
-    for (std::size_t i = 0; i < n; ++i) {
-        const float w = cover[i];
-        for (int c = 0; c < 3; ++c) {
-            const std::size_t k = c * n + i;
-            const float filled = std::max(0.0f, wall[k] + correction[k]);
-            out[k] = light[k] * (1.0f - w) + filled * w;
+    matting::parallel_for(n, [&](std::size_t i0, std::size_t i1) {
+        for (std::size_t i = i0; i < i1; ++i) {
+            const float w = cover[i];
+            for (int c = 0; c < 3; ++c) {
+                const std::size_t k = c * n + i;
+                const float filled = std::max(0.0f, wall[k] + correction[k]);
+                out[k] = light[k] * (1.0f - w) + filled * w;
+            }
         }
-    }
+    }, 1 << 14);
     return out;
 }
 
@@ -379,7 +412,8 @@ void adjust_hue_saturation(std::vector<float>& planes, int width, int height,
     if (!crop.adjusted()) return;
     const std::size_t n = static_cast<std::size_t>(width) * height;
     const float sat = crop.saturation / 100.0f, light = crop.lightness / 100.0f;
-    for (std::size_t i = 0; i < n; ++i) {
+    matting::parallel_for(n, [&](std::size_t i0, std::size_t i1) {
+    for (std::size_t i = i0; i < i1; ++i) {
         float r = std::clamp(planes[i], 0.0f, 1.0f);
         float g = std::clamp(planes[n + i], 0.0f, 1.0f);
         float b = std::clamp(planes[2 * n + i], 0.0f, 1.0f);
@@ -402,6 +436,7 @@ void adjust_hue_saturation(std::vector<float>& planes, int width, int height,
         planes[n + i] = g + (to - g) * k;
         planes[2 * n + i] = b + (to - b) * k;
     }
+    }, 1 << 14);
 }
 
 FrameLight prepare_frame_light(const std::vector<float>& linear, const std::vector<float>& alpha,
@@ -418,7 +453,7 @@ FrameLight prepare_frame_light(const std::vector<float>& linear, const std::vect
     matting::parallel_for(n, [&](std::size_t i0, std::size_t i1) {
         for (std::size_t i = i0; i < i1; ++i) subject[i] = alpha[i] >= 0.002f;
     }, 1 << 16);
-    const int margin = fill_shadows ? std::max(48, width / 40) : 8;
+    const int margin = backdrop_margin(width, fill_shadows);
     f.not_wall = matting::dilate_cross(subject, width, height, margin);
     if (plate && plate->size() == n * 3) {
         f.plate = plate;
@@ -433,8 +468,9 @@ FrameLight prepare_frame_light(const std::vector<float>& linear, const std::vect
 std::vector<float> render_crop(const FrameLight& f, const std::vector<fixes::Point>& corners, int ow, int oh) {
     const int w = f.width, h = f.height;
     const Homography hm = quad_homography(corners, ow, oh);
-    const std::vector<float> rgb = warp(*f.linear, 3, w, h, hm, ow, oh);
-    const std::vector<float> a = warp(*f.alpha, 1, w, h, hm, ow, oh);
+    CropSource src;
+    src.rgb = warp(*f.linear, 3, w, h, hm, ow, oh);
+    src.alpha = warp(*f.alpha, 1, w, h, hm, ow, oh);
     // The backdrop as it would be without the performer: a smooth surface
     // fitted to the backdrop around the crop -- with a plate, to the light
     // on it, and the plate's own detail kept on top. Filling shadows with a
@@ -442,31 +478,89 @@ std::vector<float> render_crop(const FrameLight& f, const std::vector<fixes::Poi
     // change is wanted from the frame.
     const bool with_plate = f.plate && !f.ratio.empty();
     const bool broad = f.fill_shadows && with_plate;
-    const LightSurface surface =
-        fit_light_surface(with_plate ? f.ratio : *f.linear, f.not_wall, w, h, corners, broad);
+    src.surface = fit_light_surface(with_plate ? f.ratio : *f.linear, f.not_wall, w, h, corners, broad);
+    if (with_plate && src.surface.terms) src.plate = warp(*f.plate, 3, w, h, hm, ow, oh);
+    return finish_crop(src, hm, ow, oh, f.fill_shadows, with_plate);
+}
+
+std::vector<float> finish_crop(const CropSource& src, const Homography& hm, int ow, int oh, bool fill_shadows,
+                               bool with_plate) {
     std::vector<float> backdrop;
-    if (!surface.terms) {
-        backdrop = rgb;
-    } else if (!with_plate) {
-        backdrop = surface_image(surface, hm, ow, oh);
+    if (!src.surface.terms) {
+        backdrop = src.rgb;
+    } else if (!with_plate || src.plate.empty()) {
+        backdrop = surface_image(src.surface, hm, ow, oh);
     } else {
-        backdrop = warp(*f.plate, 3, w, h, hm, ow, oh);
-        const std::vector<float> light_on = surface_image(surface, hm, ow, oh);
+        backdrop = src.plate;
+        const std::vector<float> light_on = surface_image(src.surface, hm, ow, oh);
         for (std::size_t i = 0; i < backdrop.size(); ++i) backdrop[i] *= light_on[i];
     }
     std::vector<float> shadow;
-    if (f.fill_shadows) shadow = shadow_map(rgb, backdrop, a, ow, oh, with_plate && surface.terms);
-    const std::vector<float> cover = cover_weight(a, shadow.empty() ? nullptr : &shadow, ow, oh);
-    return fill_behind(rgb, cover, backdrop, ow, oh);
+    if (fill_shadows) shadow = shadow_map(src.rgb, backdrop, src.alpha, ow, oh, with_plate && src.surface.terms);
+    const std::vector<float> cover = cover_weight(src.alpha, shadow.empty() ? nullptr : &shadow, ow, oh);
+    return fill_behind(src.rgb, cover, backdrop, ow, oh);
+}
+
+int backdrop_margin(int frame_width, bool fill_shadows) {
+    return fill_shadows ? std::max(48, frame_width / 40) : 8;
+}
+
+void BackdropMask::build(const std::vector<float>& alpha, int width, int height, int margin) {
+    width_ = width;
+    height_ = height;
+    margin_ = margin;
+    reach_.assign(static_cast<std::size_t>(width) * height, 0);
+    const int far = std::min(margin + 1, 65535);
+    // Along each row, how far the nearest of the performer's pixels is,
+    // capped just past the margin.
+    matting::parallel_for(static_cast<std::size_t>(height), [&](std::size_t y0, std::size_t y1) {
+        for (std::size_t y = y0; y < y1; ++y) {
+            const float* row = &alpha[y * width];
+            std::uint16_t* out = &reach_[y * width];
+            int d = far;
+            for (int x = 0; x < width; ++x) {
+                d = row[x] >= 0.002f ? 0 : std::min(d + 1, far);
+                out[x] = static_cast<std::uint16_t>(d);
+            }
+            d = far;
+            for (int x = width - 1; x >= 0; --x) {
+                d = row[x] >= 0.002f ? 0 : std::min(d + 1, far);
+                out[x] = static_cast<std::uint16_t>(std::min<int>(out[x], d));
+            }
+        }
+    }, 8);
+}
+
+bool BackdropMask::hidden(int x, int y) const {
+    // Within `margin` steps across and down (Manhattan), as dilate_cross.
+    for (int dy = -margin_; dy <= margin_; ++dy) {
+        const int yy = y + dy;
+        if (yy < 0 || yy >= height_) continue;
+        if (reach_[static_cast<std::size_t>(yy) * width_ + x] <= margin_ - std::abs(dy)) return true;
+    }
+    return false;
+}
+
+std::vector<std::uint8_t> BackdropMask::wall_at(const FitGrid& g) const {
+    std::vector<std::uint8_t> wall(g.count());
+    matting::parallel_for(static_cast<std::size_t>(g.rows()), [&](std::size_t j0, std::size_t j1) {
+        for (std::size_t j = j0; j < j1; ++j)
+            for (int i = 0; i < g.columns(); ++i)
+                wall[j * g.columns() + i] =
+                    !hidden(g.rx0 + i * g.stride, g.ry0 + static_cast<int>(j) * g.stride);
+    }, 4);
+    return wall;
 }
 
 std::vector<float> encode_crop(const std::vector<float>& filled, bool linear, float scale,
                                const fixes::LightCrop& crop, int width, int height) {
     std::vector<float> encoded(filled.size());
-    for (std::size_t i = 0; i < filled.size(); ++i) {
-        const float v = linear ? filled[i] * scale : std::clamp(filled[i], 0.0f, 1.0f);
-        encoded[i] = srgb_encode(v);
-    }
+    matting::parallel_for(filled.size(), [&](std::size_t i0, std::size_t i1) {
+        for (std::size_t i = i0; i < i1; ++i) {
+            const float v = linear ? filled[i] * scale : std::clamp(filled[i], 0.0f, 1.0f);
+            encoded[i] = srgb_encode(v);
+        }
+    }, 1 << 14);
     adjust_hue_saturation(encoded, width, height, crop);
     return encoded;
 }

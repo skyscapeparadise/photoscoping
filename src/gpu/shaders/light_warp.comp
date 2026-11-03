@@ -1,0 +1,64 @@
+#version 450
+
+// A light-map crop out of the frame, through its homography: the frame's
+// light (3 planes), the matte, and the plate when there is one, each sampled
+// bilinearly k x k times a pixel and averaged -- ps::light::warp, index for
+// index.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 2, binding = 0) uniform Params {
+    uint fw;
+    uint fh;
+    uint ow;
+    uint oh;
+    uint k;
+    uint has_plate;
+    uint pad0, pad1;
+    vec4 hm[3];  // the homography's nine entries, row by row
+};
+layout(std430, set = 0, binding = 1) readonly buffer Linear { float lin[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Alpha { float alpha[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Plate { float plate[]; };
+layout(std430, set = 1, binding = 4) writeonly buffer OutRgb { float out_rgb[]; };
+layout(std430, set = 1, binding = 5) writeonly buffer OutAlpha { float out_alpha[]; };
+layout(std430, set = 1, binding = 6) writeonly buffer OutPlate { float out_plate[]; };
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= ow || p.y >= oh) return;
+    float m[9] = float[9](hm[0].x, hm[0].y, hm[0].z, hm[0].w, hm[1].x, hm[1].y, hm[1].z, hm[1].w, hm[2].x);
+    uint fn = fw * fh, on = ow * oh, o = p.y * ow + p.x;
+    float weight = 1.0 / float(k * k);
+    vec3 rgb = vec3(0.0), pl = vec3(0.0);
+    float a = 0.0;
+    for (uint sy = 0u; sy < k; ++sy)
+        for (uint sx = 0u; sx < k; ++sx) {
+            float u = float(p.x) + (float(sx) + 0.5) / float(k);
+            float v = float(p.y) + (float(sy) + 0.5) / float(k);
+            float w = m[6] * u + m[7] * v + m[8];
+            float x = (m[0] * u + m[1] * v + m[2]) / w;
+            float y = (m[3] * u + m[4] * v + m[5]) / w;
+            // Pixel centres at half-integers.
+            float px = clamp(x - 0.5, 0.0, float(fw - 1u));
+            float py = clamp(y - 0.5, 0.0, float(fh - 1u));
+            uint ix = min(uint(px), fw >= 2u ? fw - 2u : 0u);
+            uint iy = min(uint(py), fh >= 2u ? fh - 2u : 0u);
+            float tx = px - float(ix), ty = py - float(iy);
+            uint jx = min(ix + 1u, fw - 1u), jy = min(iy + 1u, fh - 1u);
+            uint i00 = iy * fw + ix, i01 = iy * fw + jx, i10 = jy * fw + ix, i11 = jy * fw + jx;
+            for (uint c = 0u; c < 3u; ++c) {
+                uint b = c * fn;
+                rgb[c] += weight * mix(mix(lin[b + i00], lin[b + i01], tx), mix(lin[b + i10], lin[b + i11], tx), ty);
+                if (has_plate != 0u)
+                    pl[c] += weight * mix(mix(plate[b + i00], plate[b + i01], tx),
+                                          mix(plate[b + i10], plate[b + i11], tx), ty);
+            }
+            a += weight * mix(mix(alpha[i00], alpha[i01], tx), mix(alpha[i10], alpha[i11], tx), ty);
+        }
+    for (uint c = 0u; c < 3u; ++c) {
+        out_rgb[c * on + o] = rgb[c];
+        if (has_plate != 0u) out_plate[c * on + o] = pl[c];
+    }
+    out_alpha[o] = a;
+}
