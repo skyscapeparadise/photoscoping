@@ -507,7 +507,11 @@ bool run_matte_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestP
     const Uint64 started = SDL_GetTicksNS();
     std::int64_t made = 0;
     for (std::int64_t i = first; i <= range_last; ++i) {
-        if (i > first && !decoder.read_next()) break;
+        if (i > first && !decoder.read_next()) {
+            std::fprintf(stderr, "the clip ended at frame %lld, before the %lld it was counted to have\n",
+                         static_cast<long long>(i), static_cast<long long>(total));
+            break;
+        }
         bool base_needed = false, plate_needed = false;
         if (!needs(i, &base_needed, &plate_needed)) continue;
         const Uint64 t = SDL_GetTicksNS();

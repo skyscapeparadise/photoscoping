@@ -105,7 +105,19 @@ bool VideoDecoder::open(const std::string& path, bool hardware) {
     rate_num_ = rate.num;
     rate_den_ = rate.num ? rate.den : 1;
     start_pts_ = stream->start_time != AV_NOPTS_VALUE ? stream->start_time : 0;
-    if (stream->nb_frames > 0) {
+    // The frames the file shows, not every frame it stores: an edit list's
+    // pre-roll before zero is decoded only to reach the first frame, and the
+    // header's count includes it (134 for a Canon clip that shows 132). The
+    // index marks those frames as discarded, so they are left out here.
+    std::int64_t shown = 0;
+    const int entries = avformat_index_get_entries_count(stream);
+    for (int e = 0; e < entries; ++e) {
+        const AVIndexEntry* entry = avformat_index_get_entry(stream, e);
+        if (entry && !(entry->flags & AVINDEX_DISCARD_FRAME)) ++shown;
+    }
+    if (entries > 0 && shown > 0) {
+        frame_count_ = stream->nb_frames > 0 ? std::min<std::int64_t>(shown, stream->nb_frames) : shown;
+    } else if (stream->nb_frames > 0) {
         frame_count_ = stream->nb_frames;
     } else if (stream->duration > 0 && frame_rate_ > 0) {
         frame_count_ = std::llround(stream->duration * av_q2d(stream->time_base) * frame_rate_);
