@@ -1,0 +1,24 @@
+#version 450
+
+// The subject's colour straight from the compositing equation, the wall
+// behind it known: wall + (image - wall) / alpha (estimate_foreground_known).
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 2, binding = 0) uniform Params { uint width; uint height; };
+layout(std430, set = 0, binding = 1) readonly buffer Linear { float lin[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Alpha { float alpha[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Wall { float wall[]; };
+layout(std430, set = 1, binding = 4) writeonly buffer Direct { float direct[]; };
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= width || p.y >= height) return;
+    uint n = width * height, i = p.y * width + p.x;
+    float a = max(alpha[i], 1e-3);
+    for (uint c = 0u; c < 3u; ++c) {
+        float image = clamp(lin[c * n + i], 0.0, 1.0);
+        float b = clamp(wall[c * n + i], 0.0, 1.0);
+        direct[c * n + i] = clamp(b + (image - b) / a, 0.0, 1.0);
+    }
+}

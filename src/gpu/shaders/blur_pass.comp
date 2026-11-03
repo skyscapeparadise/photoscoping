@@ -1,0 +1,44 @@
+#version 450
+
+// One direction of a separable blur with an explicit kernel (up to 65 taps),
+// mirrored at the edges as scipy's "reflect": d c b a | a b c d. `depth`
+// planes, each blurred on its own.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 2, binding = 0) uniform Params {
+    uint width;
+    uint height;
+    uint depth;
+    int radius;
+    uint vertical;
+    uint pad0, pad1, pad2;
+    vec4 weights[17];
+};
+layout(std430, set = 0, binding = 1) readonly buffer Src { float src[]; };
+layout(std430, set = 1, binding = 2) writeonly buffer Dst { float dst[]; };
+
+int mirror(int i, int n) {
+    int period = 2 * n;
+    i = i % period;
+    if (i < 0) i += period;
+    return i < n ? i : period - 1 - i;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    int w = int(width), h = int(height);
+    if (p.x >= w || p.y >= h) return;
+    uint n = width * height;
+    for (uint c = 0u; c < depth; ++c) {
+        float acc = 0.0;
+        for (int k = -radius; k <= radius; ++k) {
+            int t = k + radius;
+            float wt = weights[t >> 2][t & 3];
+            int x = vertical != 0u ? p.x : mirror(p.x + k, w);
+            int y = vertical != 0u ? mirror(p.y + k, h) : p.y;
+            acc += wt * src[c * n + uint(y) * width + uint(x)];
+        }
+        dst[c * n + uint(p.y) * width + uint(p.x)] = acc;
+    }
+}

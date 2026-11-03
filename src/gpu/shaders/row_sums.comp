@@ -1,0 +1,30 @@
+#version 450
+
+// Per row: the summed colour and count of solid subject (alpha > 0.9) and of
+// clear background (alpha < 0.1), the image clamped to 0..1 -- for the mean
+// colours estimate_foreground_ml starts from. One thread a row.
+
+layout(local_size_x = 64, local_size_y = 1) in;
+
+layout(set = 2, binding = 0) uniform Params { uint width; uint height; };
+layout(std430, set = 0, binding = 1) readonly buffer Linear { float lin[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Alpha { float alpha[]; };
+layout(std430, set = 1, binding = 3) writeonly buffer Sums { float sums[]; };
+
+void main() {
+    uint y = gl_GlobalInvocationID.x;
+    if (y >= height) return;
+    uint n = width * height;
+    vec4 f = vec4(0.0), b = vec4(0.0);
+    for (uint x = 0u; x < width; ++x) {
+        uint i = y * width + x;
+        float a = alpha[i];
+        vec3 c = clamp(vec3(lin[i], lin[n + i], lin[2u * n + i]), 0.0, 1.0);
+        if (a > 0.9) f += vec4(c, 1.0);
+        if (a < 0.1) b += vec4(c, 1.0);
+    }
+    for (uint k = 0u; k < 4u; ++k) {
+        sums[y * 8u + k] = f[k];
+        sums[y * 8u + 4u + k] = b[k];
+    }
+}

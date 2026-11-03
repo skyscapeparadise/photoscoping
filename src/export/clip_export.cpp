@@ -1,5 +1,7 @@
 #include "export/clip_export.hpp"
 
+#include "gpu/compute_ops.hpp"
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -297,6 +299,14 @@ bool MatteComposer::check(std::int64_t first, std::int64_t last, std::string* er
     return true;
 }
 
+bool MatteComposer::needs_frame(std::int64_t f) const {
+    const fs::path patches_dir = fs::path(render_dir_) / (stem_ + "_rematte");
+    std::error_code ec;
+    for (const fixes::PatchJob& j : jobs_)
+        if (j.frame == f && !fs::exists(patches_dir / fixes::patch_name(f, j.box), ec)) return true;
+    return false;
+}
+
 std::vector<float> MatteComposer::compose(std::int64_t f, const matting::MattingFrame& frame,
                                           std::string* error) {
     std::vector<float> alpha = read_shown_matte(render_dir_, stem_, fixes_, f, width_, height_);
@@ -413,18 +423,36 @@ bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestP
     const Uint64 started = SDL_GetTicksNS();
     const std::size_t pixels = static_cast<std::size_t>(w) * h;
     std::vector<std::uint16_t> samples(pixels * (info.subject() ? 4 : 1));
+    // The subject's colour is worked out on the GPU, the frame read there
+    // straight from the ingest pass; the CPU version stays for a device
+    // without compute.
+    std::unique_ptr<gpu::SubjectGpu> subject_gpu;
+    if (info.subject()) {
+        subject_gpu = std::make_unique<gpu::SubjectGpu>(gpu.device());
+        if (!subject_gpu->ok() || !subject_gpu->set_plate(plate.linear, w, h)) {
+            std::fprintf(stderr, "the GPU cannot work out the subject here; on the CPU instead\n");
+            subject_gpu.reset();
+        }
+    }
     for (std::int64_t f = first; f <= last; ++f) {
         if (f > first && !decoder.read_next()) {
             std::fprintf(stderr, "cannot decode frame %lld\n", static_cast<long long>(f));
             return false;
         }
         const Uint64 t = SDL_GetTicksNS();
-        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
-        const bool ingested = ingest.process(cmd, decoder, transform);
-        SDL_SubmitGPUCommandBuffer(cmd);
-        if (!ingested) return false;
-        const matting::MattingFrame frame = matting::prepare_frame(
-            ingest.read_working(), static_cast<int>(ingest.width()), static_cast<int>(ingest.height()));
+        // The frame itself, in memory, only where something on the CPU reads
+        // it: a re-matte patch still to make, or the subject without the GPU.
+        const bool cpu_frame = composer.needs_frame(f) || (info.subject() && !subject_gpu);
+        if (cpu_frame || subject_gpu) {
+            SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
+            const bool ingested = ingest.process(cmd, decoder, transform);
+            SDL_SubmitGPUCommandBuffer(cmd);
+            if (!ingested) return false;
+        }
+        matting::MattingFrame frame;
+        if (cpu_frame)
+            frame = matting::prepare_frame(ingest.read_working(), static_cast<int>(ingest.width()),
+                                           static_cast<int>(ingest.height()));
 
         const std::vector<float> alpha = composer.compose(f, frame, &error);
         if (alpha.empty()) {
@@ -432,7 +460,13 @@ bool run_export(const ExportRequest& request, gpu::GpuContext& gpu, gpu::IngestP
             return false;
         }
 
-        if (info.subject()) {
+        if (subject_gpu) {
+            if (!subject_gpu->finish(ingest.working(), alpha, w, h, &samples)) {
+                std::fprintf(stderr, "frame %lld: the GPU could not work out the subject\n",
+                             static_cast<long long>(f));
+                return false;
+            }
+        } else if (info.subject()) {
             // The subject's own colour, the wall's spill taken out of its
             // edges -- straight, not premultiplied, as all three formats
             // carry it.

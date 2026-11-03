@@ -1,0 +1,26 @@
+#version 450
+
+// One step of a cross dilation: a pixel is set if it or one of its four
+// neighbours is. Steps repeated r times set everything within Manhattan
+// distance r, as ps::matting::dilate_cross does. With threshold > 0 the source
+// is a matte, set where it reaches the threshold.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 2, binding = 0) uniform Params { uint width; uint height; float threshold; };
+layout(std430, set = 0, binding = 1) readonly buffer Src { float src[]; };
+layout(std430, set = 1, binding = 2) writeonly buffer Dst { float dst[]; };
+
+bool on(int x, int y) {
+    float v = src[uint(y) * width + uint(x)];
+    return threshold > 0.0 ? v >= threshold : v > 0.5;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    int w = int(width), h = int(height);
+    if (p.x >= w || p.y >= h) return;
+    bool set = on(p.x, p.y) || (p.x > 0 && on(p.x - 1, p.y)) || (p.x + 1 < w && on(p.x + 1, p.y)) ||
+               (p.y > 0 && on(p.x, p.y - 1)) || (p.y + 1 < h && on(p.x, p.y + 1));
+    dst[uint(p.y) * width + uint(p.x)] = set ? 1.0 : 0.0;
+}

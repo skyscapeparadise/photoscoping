@@ -1,0 +1,37 @@
+#version 450
+
+// The plate relit: times the filled, softened light ratio, brought up from
+// quarter size by resize_bilinear_planes' taps.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 2, binding = 0) uniform Params { uint width; uint height; uint qw; uint qh; };
+layout(std430, set = 0, binding = 1) readonly buffer Plate { float plate[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Ratio { float ratio[]; };
+layout(std430, set = 1, binding = 3) writeonly buffer Wall { float wall[]; };
+
+void tap(uint o, uint out_n, uint in_n, out uint i0, out uint i1, out float w1) {
+    float scale = float(in_n) / float(out_n);
+    float s = max(0.0, (float(o) + 0.5) * scale - 0.5);
+    i0 = min(uint(s), in_n - 1u);
+    i1 = min(i0 + 1u, in_n - 1u);
+    w1 = s - float(i0);
+}
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= width || p.y >= height) return;
+    uint x0, x1, y0, y1;
+    float tx, ty;
+    tap(p.x, width, qw, x0, x1, tx);
+    tap(p.y, height, qh, y0, y1, ty);
+    uint n = width * height, qn = qw * qh, i = p.y * width + p.x;
+    for (uint c = 0u; c < 3u; ++c) {
+        uint b = c * qn;
+        float a00 = ratio[b + y0 * qw + x0], a01 = ratio[b + y0 * qw + x1];
+        float a10 = ratio[b + y1 * qw + x0], a11 = ratio[b + y1 * qw + x1];
+        float top = a00 + (a01 - a00) * tx;
+        float bottom = a10 + (a11 - a10) * tx;
+        wall[c * n + i] = plate[c * n + i] * (top + (bottom - top) * ty);
+    }
+}

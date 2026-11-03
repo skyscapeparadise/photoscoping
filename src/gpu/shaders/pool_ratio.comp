@@ -1,0 +1,36 @@
+#version 450
+
+// The frame's light over the plate's, pooled by `factor` where the wall is
+// known (not near the subject): relight_plate's quarter-size ratio before it
+// is filled. Also the known weight of each block.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 2, binding = 0) uniform Params { uint width; uint height; uint qw; uint qh; uint factor; };
+layout(std430, set = 0, binding = 1) readonly buffer Linear { float lin[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Plate { float plate[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Near { float near_subject[]; };
+layout(std430, set = 1, binding = 4) writeonly buffer Ratio { float ratio[]; };
+layout(std430, set = 1, binding = 5) writeonly buffer Weight { float weight[]; };
+
+void main() {
+    uvec2 q = gl_GlobalInvocationID.xy;
+    if (q.x >= qw || q.y >= qh) return;
+    uint n = width * height, qn = qw * qh;
+    float total = 0.0;
+    vec3 f = vec3(0.0), pl = vec3(0.0);
+    for (uint dy = 0u; dy < factor; ++dy)
+        for (uint dx = 0u; dx < factor; ++dx) {
+            uint s = (q.y * factor + dy) * width + q.x * factor + dx;
+            float k = 1.0 - near_subject[s];
+            total += k;
+            f += k * vec3(lin[s], lin[n + s], lin[2u * n + s]);
+            pl += k * vec3(plate[s], plate[n + s], plate[2u * n + s]);
+        }
+    float d = max(total, 1e-6);
+    f /= d;
+    pl /= d;
+    uint i = q.y * qw + q.x;
+    for (int c = 0; c < 3; ++c) ratio[uint(c) * qn + i] = clamp(f[c] / max(pl[c], 1e-3), 0.0, 4.0);
+    weight[i] = total;
+}

@@ -1,0 +1,37 @@
+#version 450
+
+// The subject as 16-bit RGBA samples, straight alpha, Rec.709-encoded: the
+// estimated foreground -- with a plate, eased into the direct answer from
+// alpha 0.15 to 0.5 and the footage itself where solid -- packed two samples
+// to a word, as run_export hands the encoder.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 2, binding = 0) uniform Params { uint width; uint height; uint known; };
+layout(std430, set = 0, binding = 1) readonly buffer Linear { float lin[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Alpha { float alpha[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Fore { float fg[]; };
+layout(std430, set = 0, binding = 4) readonly buffer Direct { float direct[]; };
+layout(std430, set = 1, binding = 5) writeonly buffer Samples { uint samples[]; };
+
+uint to_sample(float v) { return uint(clamp(v, 0.0, 1.0) * 65535.0 + 0.5); }
+float encode_709(float l) { return pow(clamp(l, 0.0, 1.0), 1.0 / 2.4); }
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= width || p.y >= height) return;
+    uint n = width * height, i = p.y * width + p.x;
+    float a = alpha[i];
+    vec3 f = vec3(fg[i], fg[n + i], fg[2u * n + i]);
+    if (known != 0u) {
+        float t = clamp((a - 0.15) / 0.35, 0.0, 1.0);
+        t = t * t * (3.0 - 2.0 * t);
+        if (a >= 0.999 && t > 0.0) {
+            f = clamp(vec3(lin[i], lin[n + i], lin[2u * n + i]), 0.0, 1.0);
+        } else if (t > 0.0) {
+            f = f * (1.0 - t) + vec3(direct[i], direct[n + i], direct[2u * n + i]) * t;
+        }
+    }
+    samples[2u * i] = to_sample(encode_709(f.r)) | (to_sample(encode_709(f.g)) << 16);
+    samples[2u * i + 1u] = to_sample(encode_709(f.b)) | (to_sample(a) << 16);
+}

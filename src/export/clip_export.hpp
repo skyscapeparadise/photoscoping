@@ -79,6 +79,9 @@ public:
     // Whether every frame from first to last has its matte (and its refined
     // one, with a plate); the first that does not, in `error`.
     bool check(std::int64_t first, std::int64_t last, std::string* error) const;
+    // Whether compose() will need the frame itself: a re-matte patch for it
+    // still to be made. Otherwise the frame can stay on the GPU.
+    bool needs_frame(std::int64_t frame_index) const;
     std::vector<float> compose(std::int64_t frame_index, const matting::MattingFrame& frame,
                                std::string* error);
 

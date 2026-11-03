@@ -1,0 +1,45 @@
+#version 450
+
+// One half-sweep of estimate_foreground_ml's update: the pixels of one colour
+// of a checkerboard (parity), each solving its 2x2 system for foreground and
+// background from its four neighbours. Red then black is the GPU's
+// Gauss-Seidel: neighbours are always the other colour, so nothing a thread
+// reads is written in the same dispatch.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 2, binding = 0) uniform Params { uint width; uint height; uint parity; };
+layout(std430, set = 0, binding = 1) readonly buffer Image { float img[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Alpha { float a[]; };
+layout(std430, set = 1, binding = 3) buffer Fore { float f[]; };
+layout(std430, set = 1, binding = 4) buffer Back { float b[]; };
+
+const float kRegularization = 1e-5;
+const float kGradientWeight = 1.0;
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= width || p.y >= height || ((p.x + p.y) & 1u) != parity) return;
+    uint n = width * height, i = p.y * width + p.x;
+    float a0 = a[i];
+    float a1 = 1.0 - a0;
+    float a00 = a0 * a0, a01 = a0 * a1, a11 = a1 * a1;
+    vec3 image = clamp(vec3(img[i], img[n + i], img[2u * n + i]), 0.0, 1.0);
+    vec3 r0 = a0 * image, r1 = a1 * image;
+    ivec2 q[4] = ivec2[4](ivec2(int(p.x) - 1, int(p.y)), ivec2(int(p.x) + 1, int(p.y)),
+                          ivec2(int(p.x), int(p.y) - 1), ivec2(int(p.x), int(p.y) + 1));
+    for (int d = 0; d < 4; ++d) {
+        uint j = uint(clamp(q[d].y, 0, int(height) - 1)) * width + uint(clamp(q[d].x, 0, int(width) - 1));
+        float da = kRegularization + kGradientWeight * abs(a0 - a[j]);
+        a00 += da;
+        a11 += da;
+        r0 += da * vec3(f[j], f[n + j], f[2u * n + j]);
+        r1 += da * vec3(b[j], b[n + j], b[2u * n + j]);
+    }
+    float inv = 1.0 / (a00 * a11 - a01 * a01);
+    float b00 = inv * a11, b01 = -inv * a01, b11 = inv * a00;
+    vec3 fc = clamp(b00 * r0 + b01 * r1, 0.0, 1.0);
+    vec3 bc = clamp(b01 * r0 + b11 * r1, 0.0, 1.0);
+    f[i] = fc.r; f[n + i] = fc.g; f[2u * n + i] = fc.b;
+    b[i] = bc.r; b[n + i] = bc.g; b[2u * n + i] = bc.b;
+}

@@ -1,0 +1,18 @@
+#version 450
+
+// pymatting's _resize_nearest, planar, `depth` planes.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 2, binding = 0) uniform Params { uint dw; uint dh; uint sw; uint sh; uint depth; };
+layout(std430, set = 0, binding = 1) readonly buffer Src { float src[]; };
+layout(std430, set = 1, binding = 2) writeonly buffer Dst { float dst[]; };
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= dw || p.y >= dh) return;
+    uint ys = min(p.y * sh / dh, sh - 1u);
+    uint xs = min(p.x * sw / dw, sw - 1u);
+    uint sn = sw * sh, dn = dw * dh;
+    for (uint c = 0u; c < depth; ++c) dst[c * dn + p.y * dw + p.x] = src[c * sn + ys * sw + xs];
+}

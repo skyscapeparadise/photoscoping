@@ -182,6 +182,8 @@ add_custom_target(photoscoping_shaders DEPENDS "${PHOTOSCOPING_SHADER_HEADER}")
 add_library(photoscoping_ui STATIC
     src/gpu/gpu_context.cpp
     src/gpu/pipeline.cpp
+    src/gpu/compute.cpp
+    src/gpu/compute_ops.cpp
     src/gpu/ingest_pass.cpp
     src/gpu/display_pass.cpp
     src/gpu/nebula_pass.cpp
@@ -246,3 +248,8 @@ add_test(NAME fixes COMMAND fixes_tests)
 add_executable(export_tests tests/test_export.cpp src/light/light_map.cpp)
 target_link_libraries(export_tests PRIVATE photoscoping_matting photoscoping_media photoscoping_fixes)
 add_test(NAME export COMMAND export_tests)
+
+add_executable(gpu_tests tests/test_gpu.cpp)
+target_link_libraries(gpu_tests PRIVATE photoscoping_ui photoscoping_matting)
+add_dependencies(gpu_tests photoscoping_shaders)
+add_test(NAME gpu COMMAND gpu_tests)
