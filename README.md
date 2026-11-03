@@ -205,9 +205,18 @@ the edge band reaches, how soft its own edge is -- were set on 4K and are
 widened in proportion above it, since the whole-frame model sees an 8K frame
 at a quarter of its size and its edges come out twice as soft in the frame's
 pixels; at 4K and below nothing changes. Up to 4K a frame is meant to take no
-more than about 30 seconds; at 8K quality comes first, and a frame takes
-about 32 seconds on an M1 Max (10.5 GB at most). The matting run's log gives
-each frame's time by stage.
+more than about 30 seconds; at 8K quality comes first, and a frame of the
+native 8K test clip takes about 33 seconds on an M1 Max, 27 of them in the
+models (34 GB at most). The matting run's log gives each frame's time by
+stage. The edge solve's cells are independent, and are solved on every core.
+
+Everything else runs on the GPU where it can, with what stays on the CPU on
+every core. The subject export works out the subject's colour in compute
+shaders, reading the frame straight from the ingest pass (about 0.45 s a frame
+at 8K, most of it the encoder); light maps cut each crop from the frame there
+and bring back only the crops (about 1 s a frame at 8K, both passes). Setting
+`PHOTOSCOPING_CPU=1` takes the CPU route instead, for comparing the two;
+`gpu_tests` checks the GPU results against the CPU's.
 
 The matting stack runs through ONNX Runtime -- on the GPU through Core ML, on
 the Mac -- with two models `tools/export_matting_model.py` writes into
