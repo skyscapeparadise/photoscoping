@@ -50,6 +50,15 @@ bool obtain_plate(const std::string& render_dir, const std::string& clip_stem,
                   media::VideoDecoder& decoder, const gpu::InputTransform& transform,
                   matting::PlateImage* plate, std::string* error);
 
+// The plate as scene light: the same frames, decoded with `scene` -- from the
+// camera's log -- as well as through `transform`, which is how they are read
+// first. Read if it has been made, made and saved (as EXR) if not.
+bool obtain_scene_plate(const std::string& render_dir, const std::string& clip_stem,
+                        const fixes::PlateRange& range, gpu::GpuContext& gpu, gpu::IngestPass& ingest,
+                        media::VideoDecoder& decoder, const gpu::InputTransform& transform,
+                        const gpu::InputTransform& scene, matting::PlateImage* plate, std::string* error);
+bool load_scene_plate(const std::string& path, matting::PlateImage* plate);
+
 // One frame's matte refined by the plate: the plate relit for the frame,
 // the override applied if asked for, and the band solved again knowing the
 // wall. `wall` and `tolerance`, if given, are set to what was used.

@@ -140,7 +140,10 @@ image as before. Without such a LUT, linear light is decoded by the file's
 tags. A white board that reads 0.76 through a Wide DR LUT is 2.9 as scene light
 -- the board's real brightness against the rest of the shot. The sidecar and
 the preview's caption both say which decode was used; Graded Look is the LUT'd
-image, as the viewer shows it.
+image, as the viewer shows it. With a clean plate set, the plate is made in
+scene light as well -- `<clip>_plate_<first>_<last>_scene.exr`, float, since
+scene light runs past white -- and linear light is filled from that, so the
+backdrop behind the performer is in the same light as the rest of the map.
 
 Where the performer passes in front of a crop, the backdrop behind them is
 filled in: a smooth surface fitted to the backdrop around the crop (with a

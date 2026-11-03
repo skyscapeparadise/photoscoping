@@ -710,8 +710,12 @@ bool run_matte_serve(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::Ingest
 
 // The clip's clean plate on its own, as the app's plate job: made from the
 // frames its fixes name, so the editor has it to show and to estimate with.
+//
+// With a LUT that names a camera log (`scene` not null), the plate is made as
+// scene light too, for light maps.
 bool run_plate_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestPass& ingest,
-                    ps::media::VideoDecoder& decoder, const ps::gpu::InputTransform& transform) {
+                    ps::media::VideoDecoder& decoder, const ps::gpu::InputTransform& transform,
+                    const ps::gpu::InputTransform* scene) {
     namespace fs = std::filesystem;
     const std::string stem = fs::path(o.clip).stem().string();
     ps::fixes::Fixes fixes;
@@ -728,6 +732,11 @@ bool run_plate_clip(const Options& o, ps::gpu::GpuContext& gpu, ps::gpu::IngestP
     if (!ps::exporting::obtain_plate(o.plate_clip, stem, fixes.plate, gpu, ingest, decoder, transform,
                                      &plate, &error)) {
         std::fprintf(stderr, "cannot make the clean plate: %s\n", error.c_str());
+        return false;
+    }
+    if (scene && !ps::exporting::obtain_scene_plate(o.plate_clip, stem, fixes.plate, gpu, ingest, decoder,
+                                                    transform, *scene, &plate, &error)) {
+        std::fprintf(stderr, "cannot make the clean plate as scene light: %s\n", error.c_str());
         return false;
     }
     return true;
@@ -986,7 +995,11 @@ int main(int argc, char** argv) {
     }
 
     if (!options->plate_clip.empty()) {
-        const int status = run_plate_clip(*options, gpu, ingest, decoder, transform) ? 0 : 1;
+        bool from_log = false;
+        const ps::gpu::InputTransform scene =
+            ps::gpu::scene_transform_for(decoder.signal(), lut ? &*lut : nullptr, &from_log);
+        const int status =
+            run_plate_clip(*options, gpu, ingest, decoder, transform, from_log ? &scene : nullptr) ? 0 : 1;
         ingest.destroy();
         gpu.destroy();
         SDL_Quit();

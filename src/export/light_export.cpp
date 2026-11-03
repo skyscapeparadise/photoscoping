@@ -77,6 +77,16 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
         std::fprintf(stderr, "cannot make the clean plate: %s\n", error.c_str());
         return false;
     }
+    // Linear light from a camera log is filled from the plate in the same
+    // light: the plate decoded as scene light too.
+    matting::PlateImage scene_plate;
+    if (fixes.plate.set() && settings.linear && request.scene_from_log &&
+        !obtain_scene_plate(request.render_dir, stem, fixes.plate, gpu, ingest, decoder, transform,
+                            request.scene, &scene_plate, &error)) {
+        std::fprintf(stderr, "cannot make the clean plate as scene light: %s\n", error.c_str());
+        return false;
+    }
+    const matting::PlateImage& light_plate = scene_plate.empty() ? plate : scene_plate;
     MatteComposer composer;
     composer.open(request.render_dir, stem, fixes, w, h, total, request.models, request.model_cpu,
                   plate.empty() ? nullptr : &plate);
@@ -203,11 +213,9 @@ bool run_light_maps(const LightRequest& request, gpu::GpuContext& gpu, gpu::Inge
             return false;
         }
 
-        // The plate was made as the LUT shows the set; against scene light it
-        // still serves, the smooth surface fitted to the ratio taking up the
-        // difference across a crop's backdrop.
         const light::FrameLight fl = light::prepare_frame_light(
-            light_of(*frame), alpha, w, h, plate.empty() ? nullptr : &plate.linear, settings.fill_shadows);
+            light_of(*frame), alpha, w, h, light_plate.empty() ? nullptr : &light_plate.linear,
+            settings.fill_shadows);
 
         for (const auto& out : outputs) {
             const int ow = out->width, oh = out->height;

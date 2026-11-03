@@ -310,6 +310,14 @@ void test_light_maps() {
     CHECK(f && std::fread(head, 1, 8, f) == 8);
     if (f) std::fclose(f);
     CHECK(head[0] == 0x76 && head[1] == 0x2f && head[2] == 0x31 && head[3] == 0x01 && head[4] == 2);
+    // And back, to half precision, past 1 as well.
+    std::vector<float> back;
+    int bw = 0, bh = 0;
+    CHECK(media::read_exr_half(exr, &back, &bw, &bh) && bw == 37 && bh == 21 && back.size() == rgb.size());
+    float worst = 0.0f;
+    for (std::size_t i = 0; i < back.size() && i < rgb.size(); ++i)
+        worst = std::max(worst, std::fabs(back[i] - rgb[i]) / std::max(1.0f, std::fabs(rgb[i])));
+    CHECK(worst < 1e-3f);
     fs::remove(exr);
 }
 

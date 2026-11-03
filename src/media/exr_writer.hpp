@@ -13,4 +13,8 @@ namespace ps::media {
 // nothing is clamped.
 bool write_exr_half(const std::string& path, const std::vector<float>& rgb, int width, int height);
 
+// Reads one back: what write_exr_half() writes -- half-float RGB scanlines,
+// uncompressed or ZIP -- and no more. Planar RGB out. False for anything else.
+bool read_exr_half(const std::string& path, std::vector<float>* rgb, int* width, int* height);
+
 }  // namespace ps::media

@@ -13,6 +13,7 @@
 #include "matting/foreground.hpp"
 #include "matting/matte_model.hpp"
 #include "matting/png16.hpp"
+#include "media/exr_writer.hpp"
 #include "media/video_encoder.hpp"
 
 namespace ps::exporting {
@@ -178,6 +179,71 @@ bool obtain_plate(const std::string& render_dir, const std::string& clip_stem,
         }
     }
     std::printf("made the clean plate from %d frames: %s\n", builder.count(), path.c_str());
+    std::fflush(stdout);
+    return true;
+}
+
+bool load_scene_plate(const std::string& path, matting::PlateImage* plate) {
+    return media::read_exr_half(path, &plate->linear, &plate->width, &plate->height);
+}
+
+bool obtain_scene_plate(const std::string& render_dir, const std::string& clip_stem,
+                        const fixes::PlateRange& range, gpu::GpuContext& gpu, gpu::IngestPass& ingest,
+                        media::VideoDecoder& decoder, const gpu::InputTransform& transform,
+                        const gpu::InputTransform& scene, matting::PlateImage* plate, std::string* error) {
+    const fs::path path = fs::path(render_dir) / fixes::plate_scene_image_name(clip_stem, range);
+    if (load_scene_plate(path.string(), plate) && plate->width == decoder.width() &&
+        plate->height == decoder.height())
+        return true;
+
+    matting::PlateBuilder builder;
+    for (const std::int64_t f : fixes::plate_frames(range)) {
+        if (f >= decoder.frame_count() || !decoder.seek_frame(f)) {
+            *error = "cannot decode plate frame " + std::to_string(f);
+            return false;
+        }
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
+        bool ingested = ingest.process(cmd, decoder, transform);
+        if (ingested) ingested = ingest.process_again(cmd, scene);
+        SDL_SubmitGPUCommandBuffer(cmd);
+        if (!ingested) {
+            *error = "cannot read plate frame " + std::to_string(f);
+            return false;
+        }
+        builder.add(matting::prepare_frame(ingest.read_scene(), static_cast<int>(ingest.width()),
+                                           static_cast<int>(ingest.height())));
+    }
+    *plate = builder.finish();
+    if (plate->empty()) {
+        *error = "no frames for the plate";
+        return false;
+    }
+    std::error_code ec;
+    fs::path partial = path;
+    partial.replace_extension(".partial.exr");
+    if (!media::write_exr_half(partial.string(), plate->linear, plate->width, plate->height)) {
+        *error = "cannot write " + partial.string();
+        return false;
+    }
+    fs::rename(partial, path, ec);
+    if (ec) {
+        *error = "cannot rename " + partial.string() + ": " + ec.message();
+        return false;
+    }
+    // Scene plates from other frames go, as the others do.
+    const std::string prefix = clip_stem + "_plate_";
+    for (fs::directory_iterator it(path.parent_path(), ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name == path.filename().string() || name.compare(0, prefix.size(), prefix) != 0) continue;
+        long long a = 0, b = 0;
+        char tail[16] = {};
+        if (std::sscanf(name.c_str() + prefix.size(), "%lld_%lld%15s", &a, &b, tail) == 3 &&
+            name == fixes::plate_scene_image_name(clip_stem, fixes::PlateRange{a, b, false})) {
+            std::error_code removed;
+            fs::remove(it->path(), removed);
+        }
+    }
+    std::printf("made the clean plate as scene light from %d frames: %s\n", builder.count(), path.c_str());
     std::fflush(stdout);
     return true;
 }

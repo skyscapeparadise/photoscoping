@@ -5,6 +5,7 @@
 
 #include "color/color_space.hpp"
 #include "fixes/mask.hpp"
+#include "media/exr_writer.hpp"
 #include "media/half.hpp"
 
 namespace ps::app {
@@ -140,7 +141,11 @@ void LightPreview::prepare(Frame in) {
     if (in.plate_path != plate_path_) {
         plate_path_ = in.plate_path;
         plate_ = {};
-        if (!plate_path_.empty()) matting::load_plate(plate_path_, &plate_);
+        // The scene-light plate is float; the other, a PNG.
+        if (plate_path_.size() > 4 && plate_path_.compare(plate_path_.size() - 4, 4, ".exr") == 0)
+            media::read_exr_half(plate_path_, &plate_.linear, &plate_.width, &plate_.height);
+        else if (!plate_path_.empty())
+            matting::load_plate(plate_path_, &plate_);
     }
     const bool plate_fits = !plate_.empty() && plate_.width == w && plate_.height == h;
     light_ = light::prepare_frame_light(linear_, alpha_, w, h, plate_fits ? &plate_.linear : nullptr,

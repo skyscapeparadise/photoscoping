@@ -101,6 +101,10 @@ std::string plate_image_name(const std::string& clip, const PlateRange& plate) {
     return clip + "_plate_" + std::to_string(plate.first) + "_" + std::to_string(plate.last) + ".png";
 }
 
+std::string plate_scene_image_name(const std::string& clip, const PlateRange& plate) {
+    return clip + "_plate_" + std::to_string(plate.first) + "_" + std::to_string(plate.last) + "_scene.exr";
+}
+
 std::string plate_mattes_name(const std::string& clip, const PlateRange& plate) {
     return clip + "_mattes_plate_" + std::to_string(plate.first) + "_" + std::to_string(plate.last) +
            (plate.correct ? "_correct" : "");

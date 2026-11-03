@@ -1237,7 +1237,19 @@ void EditorApp::request_light_preview() {
             in.patch_rect = patches_.rect();
         }
         in.fixes = fixes_;
-        if (plate_image_ready()) in.plate_path = plate_image_path();
+        if (plate_image_ready()) {
+            // Linear light from a camera log wants the plate in the same light.
+            in.plate_path = plate_image_path();
+            bool from_log = false;
+            gpu::scene_transform_for(clip_.decoder().signal(), options_.lut ? &*options_.lut : nullptr, &from_log);
+            if (fixes_.light_export.linear && from_log) {
+                const std::string scene = (std::filesystem::path(options_.render_dir) /
+                                           fixes::plate_scene_image_name(clip_name_, fixes_.plate))
+                                              .string();
+                std::error_code ec;
+                if (std::filesystem::exists(scene, ec)) in.plate_path = scene;
+            }
+        }
         frame = std::move(in);
     }
     light_preview_.request(std::move(frame), std::move(request));

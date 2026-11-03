@@ -148,6 +148,10 @@ struct PlateRange {
 //   <clip>_mattes_plate_<first>_<last>[_correct]/
 std::string plate_image_name(const std::string& clip, const PlateRange& plate);
 std::string plate_mattes_name(const std::string& clip, const PlateRange& plate);
+// The same plate as scene light -- decoded from the camera's log, for light
+// maps -- which runs past white, so in float:
+//   <clip>_plate_<first>_<last>_scene.exr
+std::string plate_scene_image_name(const std::string& clip, const PlateRange& plate);
 // The frames the plate is averaged from: all of them, or `limit` spread
 // evenly across.
 std::vector<std::int64_t> plate_frames(const PlateRange& plate, int limit = 16);
