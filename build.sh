@@ -47,7 +47,9 @@ echo "building photoscoping (${BUILD_TYPE}, -j${JOBS})..."
 
 # Printed because a toolchain and SDK that disagree fail deep inside the first
 # vendored configure, nowhere near the actual cause.
-echo "  toolchain: ${DEVELOPER_DIR:-$(xcode-select -p)} (SDK $(xcrun --show-sdk-version))"
+# The macOS SDK by name: a bare xcrun can land on the Command Line Tools' own
+# copy, which an OS update can leave without its version information.
+echo "  toolchain: ${DEVELOPER_DIR:-$(xcode-select -p)} (SDK $(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo unknown))"
 
 # Shader build tools. Not vendored: they compile the shaders that ship with
 # photoscoping, at build time, and nothing links against them.
