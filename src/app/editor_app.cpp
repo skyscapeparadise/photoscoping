@@ -1170,7 +1170,7 @@ bool EditorApp::wants_coverage() const {
 
 void EditorApp::request_light_preview() {
     const fixes::LightCrop* crop = fixes_.find_light(root_.light_tool()->selected());
-    if (root_.tool() != editor::Tool::kLight || !crop || source_ != MatteSource::kFrames || playing_ ||
+    if (!clip_.is_open() || root_.tool() != editor::Tool::kLight || !crop || source_ != MatteSource::kFrames || playing_ ||
         shown_ < 0) {
         if (!crop) light_preview_.clear();
         return;
@@ -1297,19 +1297,26 @@ void EditorApp::request_subject() {
 void EditorApp::prepare(SDL_GPUCommandBuffer* cmd, Uint32 width, Uint32 height, float dt) {
     request_subject();
     request_light_preview();
-    if (light_preview_.take(cmd) || !fixes_.find_light(root_.light_tool()->selected())) {
-        root_.inspector()->light_controls()->set_preview(
-            fixes_.find_light(root_.light_tool()->selected()) ? light_preview_.texture() : nullptr,
-            light_preview_.aspect(),
-            [&] {
-                if (!fixes_.light_export.linear) return std::string("preview \xC2\xB7 the graded look");
+    // The caption asks the clip how it decodes, so only with a clip open and
+    // a crop selected; otherwise the card shows no preview.
+    const bool has_crop = fixes_.find_light(root_.light_tool()->selected()) != nullptr;
+    if (light_preview_.take(cmd) || !has_crop) {
+        std::string caption;
+        if (has_crop && clip_.is_open()) {
+            if (!fixes_.light_export.linear) {
+                caption = "preview \xC2\xB7 the graded look";
+            } else {
                 bool from_log = false;
                 const gpu::InputTransform scene = gpu::scene_transform_for(
                     clip_.decoder().signal(), options_.lut ? &*options_.lut : nullptr, &from_log);
-                return std::string("preview \xC2\xB7 linear light") +
-                       (from_log ? std::string(" from ") + color::transfer_name(scene.transfer) : std::string()) +
-                       ", this frame's exposure";
-            }());
+                caption = std::string("preview \xC2\xB7 linear light") +
+                          (from_log ? std::string(" from ") + color::transfer_name(scene.transfer)
+                                    : std::string()) +
+                          ", this frame's exposure";
+            }
+        }
+        root_.inspector()->light_controls()->set_preview(has_crop ? light_preview_.texture() : nullptr,
+                                                         light_preview_.aspect(), caption);
     }
     advance(cmd);
     root_.timeline()->set_frame(std::max<std::int64_t>(shown_, 0));
